@@ -1,2 +1,5 @@
 bump-release.sh
 release-list.txt
+*.out
+__pycache__
+environment/target
