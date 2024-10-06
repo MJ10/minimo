@@ -3,7 +3,7 @@ task: teacher
 defaults:
     - _self_
     - agent: mcts-lm
-    - theory: propositional-logic
+    - theory: groups
 
 iterations: 5
 n_conjectures: 200
@@ -17,8 +17,11 @@ train_policy_on_hindsight_examples: true
 freeze_conjecturer: false
 
 job:
-    wandb_project: peano
+    wandb_project: minimo
+    name: test_full
 
 hydra:
     job:
         chdir: true
+    run:
+        dir: /network/scratch/m/moksh.jain/minimo_experiments/${job.name}/

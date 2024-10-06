@@ -234,6 +234,7 @@ def setup_wandb(cfg: DictConfig):
         with open_dict(cfg.job):
             cfg.job.cwd = os.getcwd()
         wandb.init(
+                name=cfg.job.name,
                 project=cfg.job.wandb_project,
                 resume=cfg.job.get('resume', False),
                 config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True))

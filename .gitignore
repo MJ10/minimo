@@ -3,3 +3,4 @@ release-list.txt
 *.out
 __pycache__
 environment/target
+outputs/

@@ -988,7 +988,7 @@ class ProofSearchAgent:
         examples = []
 
         while not (node.is_terminal() or node.is_dead()):
-            print('State:', node.state_node)
+            # print('State:', node.state_node)
 
             mcts = MonteCarloTreeSearch(self._policy, self._max_mcts_nodes, use_policy=True)
             solved, pi, _, it = mcts.evaluate(node)
@@ -996,23 +996,23 @@ class ProofSearchAgent:
             if solved:
                 break
 
-            print('Actions:', list(map(str, node.actions)))
-            print('Policy:', pi)
+            # print('Actions:', list(map(str, node.actions)))
+            # print('Policy:', pi)
 
             best = pi.argmax()
 
-            print('Taking action', node.actions[best])
+            # print('Taking action', node.actions[best])
             node = node.children()[best]
 
             iterations += 1
             if iterations >= self._max_searches:
                 break
 
-        if solved:
-            print('Found solution!')
-            print(format_blocks_with_indent(root.reconstruct_proof()))
-        else:
-            print('Did not find solution.')
+        # if solved:
+            # print('Found solution!')
+            # print(format_blocks_with_indent(root.reconstruct_proof()))
+        # else:
+            # print('Did not find solution.')
 
         examples = self._policy.extract_examples(root)
         self._examples.extend(examples)
