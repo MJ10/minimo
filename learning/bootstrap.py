@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 
-'''
-Implements the conjecture-prove bootstrapping learning loop.
-'''
+"""Implements the conjecture-prove bootstrapping learning loop."""
 
 import asyncio
 import os
 import io
 import json
 import datetime
-from dataclasses import dataclass
-from typing import Optional
-import random
 
 import hydra
 from omegaconf import DictConfig
@@ -21,17 +16,19 @@ from tqdm import tqdm
 
 import peano
 import worker
-from worker import StudentResult
-from conjecture import conjecture_beam_search, AgentLM, Context, sample_conjecture
-from proofsearch import make_agent
-from hindsight import HindsightExample
+from worker import StudentResult  # noqa
+from hindsight import HindsightExample  # noqa
 from util import format_blocks_with_indent, sample_batch, setup_wandb, value_color, save_json
+from conjecture import AgentLM, Context, sample_conjecture
+from proofsearch import make_agent
 
 
 def now() -> str:
     return '[' + datetime.datetime.now().isoformat() + ']'
 
+
 FAIL = "fail"
+
 
 DISTRIBUTED = os.environ.get('DISTRIBUTED', False)
 
@@ -115,7 +112,7 @@ async def teacher_loop(cfg: DictConfig):
             conjectures = []
 
             while len(conjectures) < cfg.n_conjectures:
-                proposal = sample_conjecture(AgentLM(agent, 'Conj:(HARD) '), context)
+                proposal = sample_conjecture(AgentLM(agent, 'Conj:(hard) '), context)
 
                 if proposal and proposal not in conjectures + proven_conjectures:
                     conjectures.append(proposal)

@@ -1,9 +1,9 @@
+= : [('t : type) -> 't -> 't -> prop].
+
 G : type.
 
 op : [G -> G -> G].
 id : G.
-
-= : [('t : type) -> 't -> 't -> prop].
 
 /* Associativity */
 #forward op_assoc ((op (op 'a 'b) 'c) : G).
