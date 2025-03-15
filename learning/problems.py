@@ -366,10 +366,82 @@ empty : type.
         nng_problems + remaining_problems,
     )
 
+def load_kleene_logic_problemset():
+    logic_theory = """
+and : [prop -> prop -> prop].
+
+and_elim_l : [('p : prop) -> ('q : prop) -> (and 'p 'q) -> 'p].
+#forward and_elim_l ('po : (and 'p 'q)).
+and_elim_r : [('p : prop) -> ('q : prop) -> (and 'p 'q) -> 'q].
+#forward and_elim_r ('po : (and 'p 'q)).
+and_intro : [('p : prop) -> ('q : prop) -> 'p -> 'q -> (and 'p 'q)].
+#backward and_intro infer infer subgoal subgoal.
+
+or : [prop -> prop -> prop].
+
+or_l : [('p : prop) -> ('q : prop) -> 'p -> (or 'p 'q)].
+#backward or_l infer infer subgoal.
+
+or_r : [('p : prop) -> ('q : prop) -> 'q -> (or 'p 'q)].
+#backward or_r infer infer subgoal.
+
+or_elim : [('p : prop) -> ('q : prop) -> (or 'p 'q) ->
+           ('r : prop) -> ['p -> 'r] -> ['q -> 'r]
+           -> 'r].
+#backward or_elim infer infer infer infer subgoal subgoal.
+
+false : prop.
+false_elim : [('p : prop) -> false -> 'p].
+#backward false_elim infer infer.
+
+not : [prop -> prop] = (lambda ('p0 : prop) ['p0 -> false]).
+
+iff : [prop -> prop -> prop] = (lambda ('p1 : prop, 'p2 : prop) (and ['p1 -> 'p2] ['p2 -> 'p1])).
+    """
+    kleene_problems = [
+        TheoremStatement("theorem1", "[('A : prop) -> ['A -> 'A]]", []),  
+        TheoremStatement("theorem2", "[('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> 'B] -> ['B -> 'C] -> ['A -> 'C]]", []),  
+        TheoremStatement("theorem3", "[('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> ['B -> 'C]] -> ['B -> ['A -> 'C]]]", []),  
+        TheoremStatement("theorem4", "[('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> ['B -> 'C]] -> [(and 'A 'B) -> 'C]]", []),  
+        TheoremStatement("theorem5", "[('A : prop) -> ('B : prop) -> ('C : prop) -> [(and 'A 'B) -> 'C] -> ['A -> ['B -> 'C]]]", []),  
+        TheoremStatement("theorem6", "[('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> 'B] -> [['B -> 'C] -> ['A -> 'C]]]", []),  
+        TheoremStatement("theorem7", "[('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> 'B] -> [['C -> 'A] -> ['C -> 'B]]]", []),  
+        TheoremStatement("theorem8a", "[('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> 'B] -> [(and 'A 'C) -> (and 'B 'C)]]", []),  
+        TheoremStatement("theorem8b", "[('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> 'B] -> [(and 'C 'A) -> (and 'C 'B)]]", []),  
+        TheoremStatement("theorem9a", "[('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> 'B] -> [(or 'A 'C) -> (or 'B 'C)]]", []),  
+        TheoremStatement("theorem9b", "[('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> 'B] -> [(or 'A 'C) -> (or 'B 'C)]]", []),  
+        TheoremStatement("theorem10a", "[('A : prop) -> ('B : prop) -> [(not 'A) -> ['A -> 'B]]]", []),  
+        TheoremStatement("theorem10b", "[('A : prop) -> ('B : prop) -> ['A -> [(not 'A) -> 'B]]]", []),  
+        TheoremStatement("theorem11", "[('A : prop) -> ('B : prop) -> ['B -> ['A -> 'B]]]", []),  
+        TheoremStatement("theorem12", "[('A : prop) -> ('B : prop) -> ['A -> 'B] -> [(not 'B) -> (not 'A)]]", []),  
+        TheoremStatement("theorem13", "[('A : prop) -> ('B : prop) -> ['A -> (not 'B)] -> ['B -> (not 'A)]]", []),  
+        TheoremStatement("theorem14", "[('A : prop) -> ('B : prop) -> [(not 'A) -> 'B] -> [(not 'B) -> 'A]]", []),  
+        TheoremStatement("theorem15", "[('A : prop) -> ('B : prop) -> [(not 'A) -> (not 'B)] -> ['B -> 'A]]", []),  
+        TheoremStatement("theorem16", "[('A : prop) -> ('B : prop) -> ['A -> 'B] -> ['B -> 'A] -> (iff 'A 'B)]", []),  
+        TheoremStatement("theorem17a", "[('A : prop) -> ('B : prop) -> (iff 'A 'B) -> ['A -> 'B]]", []),  
+        TheoremStatement("theorem17b", "[('A : prop) -> ('B : prop) -> (iff 'A 'B) -> ['B -> 'A]]", []),  
+        TheoremStatement("theorem18a", "[('A : prop) -> ('B : prop) -> (iff 'A 'B) -> 'A -> 'B]", []),  
+        TheoremStatement("theorem18b", "[('A : prop) -> ('B : prop) -> (iff 'A 'B) -> 'B -> 'A]", []),  
+        TheoremStatement("theorem19", "[('A : prop) -> (iff 'A 'A)]", []),  
+        TheoremStatement("theorem20", "[('A : prop) -> ('B : prop) -> (iff 'A 'B) -> (iff 'B 'A)]", []),  
+        TheoremStatement("theorem21", "[('A : prop) -> ('B : prop) -> ('C : prop) -> (iff 'A 'B) -> (iff 'B 'C) -> (iff 'A 'C)]", []),  
+        TheoremStatement("theorem22", "[('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> ['B -> 'C]] -> [(not (not 'A)) -> [(not (not 'B)) -> (not (not 'C))]]]", []),  
+        TheoremStatement("theorem23", "[('A : prop) -> ('B : prop) -> [(not (not ['A -> 'B]))] -> [(not (not 'A)) -> (not (not 'B))]]", []),  
+        TheoremStatement("theorem24", "[('A : prop) -> ('B : prop) -> ('C : prop) -> [(not (not ['A -> 'B]))] -> [(not (not ['B -> 'C]))] -> [(not (not ['A -> 'C]))]]", []),  
+        TheoremStatement("theorem25", "[('A : prop) -> ('B : prop) -> (iff (not (not (and 'A 'B))) (and (not (not 'A)) (not (not 'B))))]", [])  
+    ]
+
+    return ProblemSet(
+        logic_theory,
+        ['and_elim_l', 'and_elim_r', 'and_intro', 'or_l', 'or_r', 'or_elim', 'false_elim'],
+        kleene_problems
+    )
 
 def load_problemset(problemset_id) -> ProblemSet:
     if problemset_id in ('lean-library-logic', 'logic'):
         return load_lean_library_logic_problemset()
     elif problemset_id in ('natural-number-game', 'nng'):
         return load_natural_number_game_problemset()
+    elif problemset_id in ('kleene-logic', 'kleene'):
+        return load_kleene_logic_problemset()
     raise ValueError(f'Unknown problem set {problemset_id}')
