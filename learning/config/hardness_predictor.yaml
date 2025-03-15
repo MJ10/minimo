@@ -1,13 +1,12 @@
 task: teacher
 
-test_problems: logic
 defaults:
     - _self_
     - agent: mcts-lm
     - theory: groups
 
 iterations: 5
-n_conjectures: 10
+n_conjectures: 200
 
 difficulty_buckets:
     - hard: 20
@@ -16,9 +15,9 @@ difficulty_buckets:
 
 train_policy_on_hindsight_examples: true
 freeze_conjecturer: false
-
+continue: /network/scratch/m/moksh.jain/minimo_experiments/repro
 job:
-    wandb_project: null
+    wandb_project: minimo
     name: test_full
 
 hydra:

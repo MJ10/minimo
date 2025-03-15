@@ -21,7 +21,8 @@ from hindsight import HindsightExample  # noqa
 from util import format_blocks_with_indent, sample_batch, setup_wandb, value_color, save_json
 from conjecture import AgentLM, Context, sample_conjecture
 from proofsearch import make_agent
-
+from problems import load_problemset
+import wandb
 
 def now() -> str:
     return '[' + datetime.datetime.now().isoformat() + ']'
@@ -47,6 +48,21 @@ def get_task_result(task):
         return task
 
 
+def test_on_pset(agent, problemset, premises):
+    problems = problemset.problem_names()
+    successes = []
+    for problem in problems:
+        initial_state = problemset.initialize_problem(problem)
+        try:
+            agent_result = agent.proof_search(initial_state.goal(), initial_state)
+        except:
+            print('Error in proof search!', problem)
+            successes.append(False)
+            continue
+        # print(f'{problem}:', agent_result.success)
+        successes.append(agent_result.success)
+    return np.mean(successes)
+
 async def teacher_loop(cfg: DictConfig):
     print('Running in', 'distributed mode.' if DISTRIBUTED else 'single-process mode.')
 
@@ -60,7 +76,7 @@ async def teacher_loop(cfg: DictConfig):
                                 key=lambda kv: kv[1])
 
     premises = cfg.theory.premises
-
+    test_problemset = load_problemset(cfg.test_problems)
     d = peano.PyDerivation()
     d.incorporate(theory)
     proven_conjectures = []
@@ -101,6 +117,12 @@ async def teacher_loop(cfg: DictConfig):
 
     with open('log.jsonl', 'w') as log:
         for i in range(start_iteration, cfg.iterations):
+            test_success_rate = test_on_pset(agent, test_problemset, premises)
+            print('Test success rate:', test_success_rate)
+            log.write(json.dumps({'iteration': i,
+                                  'msg': f'Test success rate: {test_success_rate}'}))
+            log.write('\n')
+            wandb.log({'test_success_rate': test_success_rate})
             torch.save(agent, f'{i}.pt')
 
             context = Context(d, None, [])
