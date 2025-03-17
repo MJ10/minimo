@@ -23,6 +23,8 @@ from conjecture import AgentLM, Context, sample_conjecture
 from proofsearch import make_agent
 from problems import load_problemset
 import wandb
+from dataclasses import dataclass
+from typing import Optional, List, Tuple
 
 def now() -> str:
     return '[' + datetime.datetime.now().isoformat() + ']'
@@ -63,6 +65,129 @@ def test_on_pset(agent, problemset, premises):
         successes.append(agent_result.success)
     return np.mean(successes)
 
+@dataclass(eq=True, frozen=True)
+class Step:
+    """Represents one step in a tactic."""
+    arrows: tuple[str]
+    arguments: tuple[str]
+    result: str
+    branch: Optional[int]
+
+    def __init__(self, arrows: List[str], arguments: List[str], result: str,
+                 branch: Optional[int] = None):
+        object.__setattr__(self, 'arrows', tuple(arrows))
+        object.__setattr__(self, 'arguments', tuple(arguments))
+        object.__setattr__(self, 'result', result)
+        object.__setattr__(self, 'branch', branch)
+
+    def __str__(self):
+        c = f' ~~> {self.branch}' if self.branch is not None else ''
+        arrows = self.arrows[0] if len(self.arrows) == 1 else f'({"|".join(self.arrows)})'
+        return f'{self.result} <- {arrows} {", ".join(self.arguments)}{c}'
+
+
+class Tactic:
+    def __init__(self, name: str, steps: List[Step]):
+        self.steps = tuple(steps)
+        self.name = name
+        
+    def __str__(self):
+        return f'{self.name}:\n' + '\n'.join(map(str, self.steps))
+    
+    @staticmethod
+    def from_solution_slice(name: str, start_index: int, arrows: List[str], 
+                           arguments: List[List[str]], abstract_constants: bool = True) -> 'Tactic':
+        """Constructs a tactic from a slice of a solution found in a search episode."""
+        steps = []
+        rewrites = {}
+
+        for i, (arrow, args) in enumerate([(arr, args) 
+                                          for arr, args in zip(arrows, arguments) 
+                                          if args is not None]):
+            result = f'?{i}'
+            rewrites[f'!step{start_index + i}'] = result
+            
+            # Rewrite argument names based on previous steps
+            rewritten_args = []
+            for arg in args:
+                if arg in rewrites:
+                    rewritten_args.append(rewrites[arg])
+                else:
+                    rewritten_args.append(arg)
+            
+            steps.append(Step([arrow], rewritten_args, result))
+            
+        return Tactic(name, steps)
+
+
+def induce_tactics_from_proofs(student_results: List[StudentResult], max_tactics: int = 5, min_occurrences: int = 2) -> List[Tactic]:
+    # Extract successful proofs
+    successful_results = [sr for sr in student_results if sr.success and sr.solution_actions]
+    
+    if not successful_results:
+        print("No successful proofs to induce tactics from.")
+        return []
+    
+    # Create tactics from solution slices
+    tactics_from_slices = []
+    
+    for i, sr in enumerate(successful_results):
+        # Extract actions and arguments
+        # Actions are in odd positions, arguments in even positions
+        actions = sr.solution_actions[::2]
+        
+        # Create arguments list (may be None for some steps)
+        arguments = []
+        for j in range(len(actions)):
+            if j*2+1 < len(sr.solution_actions):
+                arg_str = sr.solution_actions[j*2+1]
+                # Parse arguments - this is a simplification, might need adjustment
+                arguments.append([arg_str])
+            else:
+                arguments.append(None)
+        
+        # Generate tactics from different slices of the proof
+        for start in range(len(actions) - 1):
+            for length in range(2, min(len(actions) - start + 1, 5)):  # Limit length to avoid too complex tactics
+                tactic_name = f't_{i}_{start}_{length}'
+                t = Tactic.from_solution_slice(
+                    tactic_name, 
+                    start,
+                    actions[start:start+length],
+                    arguments[start:start+length],
+                    True
+                )
+                tactics_from_slices.append(t)
+    
+    print(f"Generated {len(tactics_from_slices)} tactic slices")
+    
+    # Count occurrences of similar tactics
+    tactic_counts = {}
+    
+    for t in tactics_from_slices:
+        # Create a signature for the tactic based on its structure
+        signature = tuple((step.arrows, len(step.arguments)) for step in t.steps)
+        
+        if signature in tactic_counts:
+            tactic_counts[signature][1] += 1
+        else:
+            tactic_counts[signature] = (t, 1)
+    
+    # Filter and sort tactics by occurrence count
+    filtered_tactics = [(t, count) for (t, count) in tactic_counts.values() 
+                        if count >= min_occurrences]
+    filtered_tactics.sort(key=lambda x: x[1], reverse=True)
+    
+    # Select top tactics
+    selected_tactics = []
+    for t, count in filtered_tactics[:max_tactics]:
+        # Rename the tactic with a more meaningful name
+        t.name = f"tactic_{len(selected_tactics)}"
+        print(f"Selected tactic with {count} occurrences:\n{t}")
+        selected_tactics.append(t)
+    
+    return [t for t, _ in selected_tactics]
+
 async def teacher_loop(cfg: DictConfig):
     print('Running in', 'distributed mode.' if DISTRIBUTED else 'single-process mode.')
 
@@ -83,6 +208,7 @@ async def teacher_loop(cfg: DictConfig):
     seen_hindsight_goals = set()
     proofs = []
     outcomes = []
+    induced_tactics = []
 
     continue_dir = cfg.get('continue')
     start_iteration = 0
@@ -214,6 +340,32 @@ async def teacher_loop(cfg: DictConfig):
                 print(f'No solutions found in iteration {i} - stopping learning loop...')
                 break
 
+            # 3b- Induce tactics from successful proofs if enabled
+            if cfg.get('induce_tactics', False):
+                new_tactics = induce_tactics_from_proofs(
+                    student_results, 
+                    max_tactics=cfg.get('max_tactics', 5),
+                    min_occurrences=cfg.get('min_tactic_occurrences', 2)
+                )
+                
+                if new_tactics:
+                    induced_tactics.extend(new_tactics)
+                    print(f"Induced {len(new_tactics)} new tactics, total: {len(induced_tactics)}")
+                    
+                    # Save induced tactics
+                    with open(f'tactics_{i}.json', 'w') as f:
+                        tactics_data = [{'name': t.name, 
+                                        'steps': [{'arrows': list(s.arrows), 
+                                                  'arguments': list(s.arguments), 
+                                                  'result': s.result} 
+                                                 for s in t.steps]} 
+                                       for t in induced_tactics]
+                        json.dump(tactics_data, f, indent=2)
+                    
+                    log.write(json.dumps({'iteration': i,
+                                         'msg': f'Induced {len(new_tactics)} new tactics, total: {len(induced_tactics)}'}))
+                    log.write('\n')
+
             thresholds = [np.percentile(success_logprobs, p)
                           for _, p in difficulty_buckets]
 
@@ -222,7 +374,7 @@ async def teacher_loop(cfg: DictConfig):
                   'min =', np.min(success_logprobs),
                   'max =', np.max(success_logprobs))
 
-            # 3b- Classify problems into easy/hard.
+            # 3c- Classify problems into easy/hard.
             for student_result in student_results:
                 # Outcome is the name of the first difficulty bucket that is larger than the logprob.
                 if student_result.success:
@@ -258,7 +410,7 @@ async def teacher_loop(cfg: DictConfig):
                                   'msg': f'Training on {len(examples)} examples.'}))
             log.write('\n')
 
-            # 3c- Train model on conjecturing and proof search examples.
+            # 3d- Train model on conjecturing and proof search examples.
             if i + 1 < cfg.iterations:
                 print(len(examples), 'accumulated training examples.')
                 agent.train(examples)

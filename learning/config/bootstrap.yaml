@@ -17,6 +17,12 @@ difficulty_buckets:
 train_policy_on_hindsight_examples: true
 freeze_conjecturer: false
 
+# Tactic induction parameters
+induce_tactics: true  # Whether to induce tactics from proofs
+max_tactics: 5  # Maximum number of tactics to induce per iteration
+min_tactic_occurrences: 2  # Minimum number of occurrences for a tactic to be considered
+use_induced_tactics: true  # Whether to add the induced tactics to the agent's action space
+
 job:
     wandb_project: null
     name: test_full
