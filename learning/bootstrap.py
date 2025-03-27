@@ -362,9 +362,25 @@ async def teacher_loop(cfg: DictConfig):
                                        for t in induced_tactics]
                         json.dump(tactics_data, f, indent=2)
                     
+                    # Also save a combined tactics file for easier loading
+                    with open('tactics.json', 'w') as f:
+                        tactics_data = [{'name': t.name, 
+                                        'steps': [{'arrows': list(s.arrows), 
+                                                  'arguments': list(s.arguments), 
+                                                  'result': s.result} 
+                                                 for s in t.steps]} 
+                                       for t in induced_tactics]
+                        json.dump(tactics_data, f, indent=2)
+                    
                     log.write(json.dumps({'iteration': i,
                                          'msg': f'Induced {len(new_tactics)} new tactics, total: {len(induced_tactics)}'}))
                     log.write('\n')
+                    
+                    # Update the agent with the new tactics if enabled
+                    if cfg.get('use_induced_tactics', True):
+                        from proofsearch import HolophrasmNode
+                        HolophrasmNode.set_tactics(induced_tactics)
+                        print(f"Updated agent with {len(induced_tactics)} tactics")
 
             thresholds = [np.percentile(success_logprobs, p)
                           for _, p in difficulty_buckets]

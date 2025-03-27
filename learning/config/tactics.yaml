@@ -1,0 +1,29 @@
+# Tactics configuration
+# This file defines tactics to be included in the agent's action space
+
+# Whether to include tactics in the action space
+use_tactics: true
+
+# List of predefined tactics
+predefined_tactics:
+  - name: "intro_twice"
+    steps:
+      - arrows: ["intro"]
+        arguments: []
+        result: "?0"
+      - arrows: ["intro"]
+        arguments: []
+        result: "?1"
+  
+  - name: "intro_apply"
+    steps:
+      - arrows: ["intro"]
+        arguments: []
+        result: "?0"
+      - arrows: ["apply"]
+        arguments: []
+        result: "?1"
+
+# Whether to load induced tactics from previous runs
+load_induced_tactics: false
+induced_tactics_path: "tactics.json"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import random
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 import functools
 import time
@@ -19,7 +19,7 @@ import peano
 import problems
 import policy
 from util import format_blocks_with_indent, sample_batch, setup_wandb, value_color, tqdm_if
-from action import ProofAction
+from action import ProofAction, TacticAction, Tactic, Step
 
 
 @dataclass
@@ -193,9 +193,22 @@ class HolophrasmNode(ProofStateNode):
     # enumeration reveals to the root only the arrows that have children.
     # This class-level flag switches between these two modes.
     EAGER_NODES = True
+    
+    # Class-level tactics storage
+    _tactics = []
 
     def __init__(self, proof_states):
         self._proof_states = proof_states
+
+    @classmethod
+    def set_tactics(cls, tactics: List[Tactic]):
+        """Set the available tactics for all HolophrasmNodes."""
+        cls._tactics = tactics
+
+    @classmethod
+    def get_tactics(cls) -> List[Tactic]:
+        """Get the available tactics."""
+        return cls._tactics
 
     def clone(self) -> ProofStateNode:
         return HolophrasmNode([ps.clone() for ps in self._proof_states])
@@ -215,6 +228,9 @@ class HolophrasmNode(ProofStateNode):
             return [f'{i}' for i in range(len(self._proof_states))]
 
         # Single state: actually list out actions from Peano.
+        actions_list = []
+        
+        # Add base actions from Peano
         if HolophrasmNode.EAGER_NODES:
             peano_actions = list(self._proof_states[0].actions())
             eager_actions = []
@@ -228,10 +244,16 @@ class HolophrasmNode(ProofStateNode):
                         eager_actions.append(ProofAction([a]))
                 else:
                     eager_actions.append(ProofAction([a]))
-            return eager_actions
+            actions_list = eager_actions
         else:
             # Lazy nodes - straight actions from Peano.
-            return [ProofAction([a]) for a in self._proof_states[0].actions()]
+            actions_list = [ProofAction([a]) for a in self._proof_states[0].actions()]
+        
+        # Add tactics as actions
+        for tactic in self._tactics:
+            actions_list.append(TacticAction(tactic))
+            
+        return actions_list
 
     def goal(self) -> str:
         if self.is_terminal():
@@ -244,7 +266,17 @@ class HolophrasmNode(ProofStateNode):
             # Action should be the index of the goal.
             idx = int(action)
             return HolophrasmNode([self._proof_states[idx]])
+        
+        # Handle tactic actions differently
+        if isinstance(action, TacticAction) or (hasattr(action, 'is_tactic') and action.is_tactic()):
+            # Execute the tactic and return the resulting state
+            result_states = action.execute(self._proof_states[0])
+            if not result_states:
+                # Tactic execution failed
+                return HolophrasmNode([])  # Return an empty node (terminal but not solved)
+            return HolophrasmNode(result_states)
 
+        # Normal action
         return HolophrasmNode(action.execute(self._proof_states[0]))
 
     def __str__(self):
@@ -315,6 +347,18 @@ class HolophrasmNode(ProofStateNode):
                         blocks.append(child.reconstruct_proof(actions[i], False))
 
                 break
+            elif a.is_tactic():
+                # Handle tactic action
+                tactic_name = a.tactic.name
+                current = current.expand(a)
+                blocks.append(f"tactic {tactic_name}.")
+                
+                # If there are subgoals after applying the tactic, handle them recursively
+                if current.is_conjunctive():
+                    for i, _ in enumerate(current.actions):
+                        child = current.expand(str(i))
+                        blocks.append(child.reconstruct_proof(actions, False))
+                    break
             else:
                 raise ValueError(f'Unknown action type {str(a)}')
 
@@ -1313,6 +1357,51 @@ def make_agent(config):
 
         agent._policy = LMPolicy(config.agent.policy)
         agent._policy.train(strs, True)
+        
+    # Load tactics if specified in config
+    tactics = []
+    
+    # Load predefined tactics from config
+    if config.get('tactics') and config.tactics.get('use_tactics', False):
+        if config.tactics.get('predefined_tactics'):
+            predefined_tactics = config.tactics.predefined_tactics
+            for tactic_data in predefined_tactics:
+                steps = []
+                for step_data in tactic_data.steps:
+                    step = Step(
+                        arrows=step_data.arrows,
+                        arguments=step_data.arguments,
+                        result=step_data.result,
+                        branch=step_data.get('branch', None)
+                    )
+                    steps.append(step)
+                tactics.append(Tactic(tactic_data.name, steps))
+            print(f"Loaded {len(tactics)} predefined tactics from config")
+        
+        # Load induced tactics from file if specified
+        if config.tactics.get('load_induced_tactics', False) and config.tactics.get('induced_tactics_path'):
+            try:
+                with open(config.tactics.induced_tactics_path, 'r') as f:
+                    tactics_data = json.load(f)
+                    for tactic_data in tactics_data:
+                        steps = []
+                        for step_data in tactic_data.get('steps', []):
+                            step = Step(
+                                arrows=step_data.get('arrows', []),
+                                arguments=step_data.get('arguments', []),
+                                result=step_data.get('result', '?'),
+                                branch=step_data.get('branch', None)
+                            )
+                            steps.append(step)
+                        tactics.append(Tactic(tactic_data.get('name', f'tactic_{len(tactics)}'), steps))
+                    print(f"Loaded {len(tactics_data)} induced tactics from {config.tactics.induced_tactics_path}")
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                print(f"Failed to load induced tactics: {e}")
+    
+    # Set the tactics in the HolophrasmNode class
+    if tactics:
+        HolophrasmNode.set_tactics(tactics)
+        print(f"Set {len(tactics)} tactics in HolophrasmNode")
 
     return agent
 
