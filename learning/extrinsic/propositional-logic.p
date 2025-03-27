@@ -25,6 +25,4 @@
 20. [('A : prop) -> ('B : prop) -> (iff 'A 'B) -> (iff 'B 'A)]
 21. [('A : prop) -> ('B : prop) -> ('C : prop) -> (iff 'A 'B) -> (iff 'B 'C) -> (iff 'A 'C)]
 22. [('A : prop) -> ('B : prop) -> ('C : prop) -> ['A -> ['B -> 'C]] -> [(not (not 'A)) -> [(not (not 'B)) -> (not (not 'C))]]]
-23. [('A : prop) -> ('B : prop) -> [(not (not ['A -> 'B]))] -> [(not (not 'A)) -> (not (not 'B))]]
-24. [('A : prop) -> ('B : prop) -> ('C : prop) -> [(not (not ['A -> 'B]))] -> [(not (not ['B -> 'C]))] -> [(not (not ['A -> 'C]))]]
 25. [('A : prop) -> ('B : prop) -> (iff (not (not (and 'A 'B))) (and (not (not 'A)) (not (not 'B))))]

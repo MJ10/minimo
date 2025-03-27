@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import collections
-
+from hydra.utils import to_absolute_path
 import peano
 
 
@@ -437,11 +437,23 @@ iff : [prop -> prop -> prop] = (lambda ('p1 : prop, 'p2 : prop) (and ['p1 -> 'p2
         kleene_problems
     )
 
+def load_kleene_fix():
+    theory = open(to_absolute_path('./theories/propositional-logic.p'), 'r').read()
+    problems_text = open(to_absolute_path('./extrinsic/propositional-logic.p'), 'r').readlines()
+    problems = [TheoremStatement(p.split(". ")[0], p.split(". ")[1], []) for p in problems_text]
+    return ProblemSet(
+        theory,
+        ['and_i', 'and_el', 'and_er', 'or_il', 'or_ir', 'or_e',
+                'not_i', 'not_e', 'exfalso', 'iff_i', 'iff_el', 'iff_er', 'em'],
+        problems
+    )
+
+
 def load_problemset(problemset_id) -> ProblemSet:
     if problemset_id in ('lean-library-logic', 'logic'):
         return load_lean_library_logic_problemset()
     elif problemset_id in ('natural-number-game', 'nng'):
         return load_natural_number_game_problemset()
     elif problemset_id in ('kleene-logic', 'kleene'):
-        return load_kleene_logic_problemset()
+        return load_kleene_fix()
     raise ValueError(f'Unknown problem set {problemset_id}')
