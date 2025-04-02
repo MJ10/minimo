@@ -25,10 +25,10 @@ class ProofAction:
         return len(self._actions) == 1 and self._actions[0].is_intro()
 
     def is_construct(self):
-        return len(self._actions) <= 2 and self._actions[0].is_construct()
+        return len(self._actions) > 0 and len(self._actions) <= 2 and self._actions[0].is_construct()
 
     def is_apply(self):
-        return len(self._actions) <= 2 and self._actions[0].is_apply()
+        return len(self._actions) > 0 and len(self._actions) <= 2 and self._actions[0].is_apply()
         
     def is_tactic(self):
         return False
@@ -135,6 +135,7 @@ class TacticAction(ProofAction):
     def execute(self, state: peano.PyProofState) -> peano.PyProofState:
         """Execute the tactic on the given proof state."""
         current_states = [state]
+        result_substitutions = {}  # Maps from result placeholders to actual terms
         
         # Apply each step of the tactic in sequence
         for step in self.tactic.steps:
@@ -149,11 +150,51 @@ class TacticAction(ProofAction):
             for action in current_state.actions():
                 # Attempt to match the action with the step
                 action_str = str(action)
+                
                 for arrow in step.arrows:
-                    if arrow in action_str:
+                    # Use exact matching instead of substring matching
+                    if action_str.startswith(arrow + " ") or action_str == arrow:
+                        # If this step has arguments, check if they match what we need
+                        if step.arguments:
+                            # Parse the action arguments
+                            action_parts = action_str.split(" ")
+                            if len(action_parts) > 1:  # Has arguments
+                                # Check if arguments match
+                                arg_match = True
+                                actual_args = []
+                                
+                                for arg in step.arguments:
+                                    # If the argument is a result reference from a previous step
+                                    if arg in result_substitutions:
+                                        actual_args.append(result_substitutions[arg])
+                                    else:
+                                        # Use the argument directly
+                                        actual_args.append(arg)
+                                
+                                # If arguments don't match or wrong number of arguments, continue to next action
+                                if len(actual_args) != len(action_parts) - 1:
+                                    continue
+                                    
+                                # Try to match each argument (this is a simple check, might need refinement)
+                                for i, arg in enumerate(actual_args):
+                                    if arg != action_parts[i + 1] and arg != "*":  # Allow "*" as wildcard
+                                        arg_match = False
+                                        break
+                                        
+                                if not arg_match:
+                                    continue
+                        
                         # Found a matching action, execute it
                         next_states = current_state.execute_action(action)
                         if next_states:
+                            # If this step produces a result, store it in our substitutions
+                            if step.result:
+                                # For now, we'll just use the first construction from the last action
+                                # This is a simplification - in reality we might need more sophisticated logic
+                                construction = next_states[0].construction_from_last_action()
+                                if construction:
+                                    result_substitutions[step.result] = construction
+                            
                             current_states = next_states
                             found_action = True
                             break

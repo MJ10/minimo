@@ -25,7 +25,7 @@ from problems import load_problemset
 import wandb
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
-
+import random
 def now() -> str:
     return '[' + datetime.datetime.now().isoformat() + ']'
 
@@ -34,6 +34,15 @@ FAIL = "fail"
 
 
 DISTRIBUTED = os.environ.get('DISTRIBUTED', False)
+
+
+def set_seed(seed: int):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def submit_task(agent_dump: bytes, theory: worker.BackgroundTheory, statement: str):
@@ -141,15 +150,41 @@ def induce_tactics_from_proofs(student_results: List[StudentResult], max_tactics
         for j in range(len(actions)):
             if j*2+1 < len(sr.solution_actions):
                 arg_str = sr.solution_actions[j*2+1]
-                # Parse arguments - this is a simplification, might need adjustment
-                arguments.append([arg_str])
+                # Parse arguments by splitting the string, assuming arguments are space-separated
+                if arg_str:
+                    arguments.append(arg_str.split())
+                else:
+                    arguments.append([])
             else:
-                arguments.append(None)
+                arguments.append([])
         
         # Generate tactics from different slices of the proof
         for start in range(len(actions) - 1):
+            # Consider different lengths for tactics - longer tactics are more powerful but less reusable
             for length in range(2, min(len(actions) - start + 1, 5)):  # Limit length to avoid too complex tactics
                 tactic_name = f't_{i}_{start}_{length}'
+                
+                # Skip creating tactics from disconnected parts of the proof 
+                # (e.g. where one step doesn't depend on the previous)
+                is_connected = True
+                for step_idx in range(start + 1, start + length):
+                    # Check if this step depends on a previous result within this slice
+                    has_dependency = False
+                    for prev_step in range(start, step_idx):
+                        if prev_step < len(arguments) and step_idx < len(arguments):
+                            # Check if any argument in the current step references a result from a previous step
+                            for arg in arguments[step_idx]:
+                                if arg.startswith("!step") and int(arg[5:]) >= start and int(arg[5:]) < start + length:
+                                    has_dependency = True
+                                    break
+                    
+                    if not has_dependency:
+                        is_connected = False
+                        break
+                
+                if not is_connected:
+                    continue
+                
                 t = Tactic.from_solution_slice(
                     tactic_name, 
                     start,
@@ -166,12 +201,13 @@ def induce_tactics_from_proofs(student_results: List[StudentResult], max_tactics
     
     for t in tactics_from_slices:
         # Create a signature for the tactic based on its structure
+        # Using a more detailed signature considering both arrows and argument counts
         signature = tuple((step.arrows, len(step.arguments)) for step in t.steps)
         
         if signature in tactic_counts:
             tactic_counts[signature][1] += 1
         else:
-            tactic_counts[signature] = (t, 1)
+            tactic_counts[signature] = [t, 1]
     
     # Filter and sort tactics by occurrence count
     filtered_tactics = [(t, count) for (t, count) in tactic_counts.values() 
@@ -186,7 +222,7 @@ def induce_tactics_from_proofs(student_results: List[StudentResult], max_tactics
         print(f"Selected tactic with {count} occurrences:\n{t}")
         selected_tactics.append(t)
     
-    return [t for t, _ in selected_tactics]
+    return selected_tactics
 
 async def teacher_loop(cfg: DictConfig):
     print('Running in', 'distributed mode.' if DISTRIBUTED else 'single-process mode.')
@@ -359,7 +395,7 @@ async def teacher_loop(cfg: DictConfig):
                                                   'arguments': list(s.arguments), 
                                                   'result': s.result} 
                                                  for s in t.steps]} 
-                                       for t in induced_tactics]
+                                       for t in new_tactics]
                         json.dump(tactics_data, f, indent=2)
                     
                     # Also save a combined tactics file for easier loading
@@ -439,6 +475,7 @@ async def teacher_loop(cfg: DictConfig):
 @hydra.main(version_base="1.2", config_path="config", config_name="bootstrap")
 def main(cfg: DictConfig):
     print('Running from:', os.getcwd())
+    set_seed(cfg.seed)
     setup_wandb(cfg)
     if cfg.task == 'teacher':
         asyncio.run(teacher_loop(cfg))
