@@ -214,6 +214,9 @@ class HolophrasmNode(ProofStateNode):
         return HolophrasmNode([ps.clone() for ps in self._proof_states])
 
     def is_terminal(self) -> bool:
+        # If this is a failed tactic node, it's not a terminal (solved) node
+        if hasattr(self, '_is_failed_tactic') and self._is_failed_tactic:
+            return False
         return len(self._proof_states) == 0
 
     def is_conjunctive(self) -> bool:
@@ -272,8 +275,11 @@ class HolophrasmNode(ProofStateNode):
             # Execute the tactic and return the resulting state
             result_states = action.execute(self._proof_states[0])
             if not result_states:
-                # Tactic execution failed
-                return HolophrasmNode([])  # Return an empty node (terminal but not solved)
+                # Tactic execution failed - create a dead-end node that's not considered solved
+                failed_node = HolophrasmNode([])
+                # Add a special attribute to indicate this is a failed execution, not a solved state
+                failed_node._is_failed_tactic = True
+                return failed_node
             return HolophrasmNode(result_states)
 
         # Normal action
@@ -366,6 +372,8 @@ class HolophrasmNode(ProofStateNode):
         return blocks
 
     def reward(self) -> float:
+        if hasattr(self, '_is_failed_tactic') and self._is_failed_tactic:
+            return -1  # Failed tactic execution is a dead end
         if self.is_terminal():
             return np.inf  # Proof found.
         elif not self.actions:
@@ -1235,8 +1243,7 @@ def proof_reconstruction_example():
                -> 'r].
 
     #backward or_l infer infer infer.
-    #backward or_r infer infer infer.
-    #backward or_elim infer infer infer infer subgoal subgoal.
+    #backward or_r infer infer infer infer subgoal subgoal.
     """
 
     root = LeftmostFirstSearchNode(
