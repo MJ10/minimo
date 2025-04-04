@@ -13,3 +13,4 @@ tqdm
 transformers
 wandb
 celery
+ray[default]
