@@ -37,7 +37,7 @@ def now() -> str:
 FAIL = "fail"
 
 
-@ray.remote(num_gpus=1)
+@ray.remote(num_gpus=1, num_cpus=1)
 class ProofWorker:
     """Ray worker for proof search tasks."""
     
@@ -102,7 +102,7 @@ class ProofWorker:
                               None, None, None)
 
 
-@ray.remote(num_gpus=1)
+@ray.remote(num_gpus=1, num_cpus=1)
 class EvaluationWorker:
     """Ray worker for evaluating the agent on test problems."""
     
@@ -110,26 +110,33 @@ class EvaluationWorker:
         self.device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
         print(f"Initialized EvaluationWorker with device: {self.device}")
     
-    def evaluate_problem(self, agent_dump: bytes, problem: str, initial_state_dump: bytes) -> bool:
+    def evaluate_problem(self, agent_dump: bytes, problem_name: str, theory_text: str, 
+                        initial_library: List[str], statement: str, premises: List[str]) -> bool:
         """Evaluate a specific problem."""
         try:
-            # Load the agent and initial state
+            # Load the agent
             with io.BytesIO(agent_dump) as f:
                 agent = torch.load(f, weights_only=False)
                 # Move agent to this worker's device
                 agent._policy._lm._lm.to(self.device)
             
-            with io.BytesIO(initial_state_dump) as f:
-                initial_state = torch.load(f)
+            # Create the proof state locally
+            initial_state = peano.PyProofState(
+                theory_text,
+                initial_library + premises,
+                statement
+            )
             
-            agent_result = agent.proof_search(initial_state.goal(), initial_state)
+            agent_result = agent.proof_search(statement, initial_state)
             return agent_result.success
         except Exception as e:
-            print(f'Error in proof search for problem {problem}:', e)
+            print(f'Error in proof search for problem {problem_name}:', e)
+            import traceback
+            print(traceback.format_exc())
             return False
 
 
-@ray.remote(num_gpus=1)
+@ray.remote(num_gpus=1, num_cpus=1)
 class ConjectureWorker:
     """Ray worker for generating conjectures."""
     
@@ -137,33 +144,45 @@ class ConjectureWorker:
         self.device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
         print(f"Initialized ConjectureWorker with device: {self.device}")
     
-    def generate_conjectures(self, agent_dump: bytes, context_dump: bytes, n_conjectures: int, 
+    def generate_conjectures(self, agent_dump: bytes, theory_text: str, n_conjectures: int, 
                             proven_conjectures: List[str]) -> List[str]:
         """Generate conjectures using the provided agent."""
         try:
-            # Load the agent and context
+            # Load the agent
             with io.BytesIO(agent_dump) as f:
                 agent = torch.load(f, weights_only=False)
                 # Move agent to this worker's device
                 agent._policy._lm._lm.to(self.device)
             
-            with io.BytesIO(context_dump) as f:
-                context = torch.load(f)
+            # Create fresh derivation and context
+            d = peano.PyDerivation()
+            d.incorporate(theory_text)
+            context = Context(d, None, [])
             
             conjectures = []
+            attempts = 0
+            max_attempts = n_conjectures * 10  # Limit the number of attempts to avoid infinite loops
             
-            while len(conjectures) < n_conjectures:
+            while len(conjectures) < n_conjectures and attempts < max_attempts:
+                attempts += 1
                 proposal = sample_conjecture(AgentLM(agent, 'Conj:(hard) '), context)
                 
                 if proposal and proposal not in conjectures + proven_conjectures:
                     # Contract conjectures to make them Peano-parseable
-                    contracted_proposal = context.derivation.contract(proposal)
-                    if contracted_proposal not in conjectures + proven_conjectures:
-                        conjectures.append(contracted_proposal)
+                    try:
+                        contracted_proposal = d.contract(proposal)
+                        if contracted_proposal not in conjectures + proven_conjectures:
+                            conjectures.append(contracted_proposal)
+                    except Exception as e:
+                        print(f"Error contracting proposal: {e}")
+                        continue
             
+            print(f"Generated {len(conjectures)} conjectures after {attempts} attempts")
             return conjectures
         except Exception as e:
             print('Error in conjecture generation:', e)
+            import traceback
+            print(traceback.format_exc())
             return []
 
 
@@ -184,17 +203,29 @@ def create_placement_groups(num_gpus_available: int, num_gpus_per_worker: int = 
 def setup_ray(num_gpus_per_worker: int = 1) -> int:
     """Initialize Ray and return the number of workers that can be created."""
     if not ray.is_initialized():
-        ray.init()
+        try:
+            ray.init()
+        except Exception as e:
+            print(f"Error initializing Ray: {e}")
+            print("Falling back to single-process mode.")
+            return 1
     
-    num_gpus_available = ray.cluster_resources().get("GPU", 0)
-    print(f"Available GPUs: {num_gpus_available}")
-    
-    # Fall back to CPU if no GPUs available
-    if num_gpus_available == 0:
-        print("No GPUs available, falling back to CPU")
+    try:
+        num_gpus_available = ray.cluster_resources().get("GPU", 0)
+        print(f"Available GPUs: {num_gpus_available}")
+        
+        # Fall back to CPU if no GPUs available
+        if num_gpus_available == 0:
+            print("No GPUs available, will use CPU workers")
+            # Use CPU workers, but limit based on available CPUs
+            num_cpus = int(ray.cluster_resources().get("CPU", 2))
+            return max(1, num_cpus // 2)  # Use at most half of available CPUs
+            
+        return max(1, int(num_gpus_available // num_gpus_per_worker))
+    except Exception as e:
+        print(f"Error accessing Ray cluster resources: {e}")
+        print("Falling back to single-process mode.")
         return 1
-    
-    return int(num_gpus_available // num_gpus_per_worker)
 
 
 def test_on_pset_parallel(agent, problemset, num_workers: int) -> float:
@@ -205,26 +236,38 @@ def test_on_pset_parallel(agent, problemset, num_workers: int) -> float:
     agent_dump = agent_buffer.getvalue()
     
     problems = problemset.problem_names()
-    problem_states = {}
     
-    # Prepare initial states for each problem
+    # Extract theory information instead of pickling ProofState
+    theory_text = problemset._theory
+    initial_library = problemset._initial_library
+    
+    # Create a dictionary of problem statements and premises
+    problem_data = {}
     for problem in problems:
-        initial_state = problemset.initialize_problem(problem)
-        state_buffer = io.BytesIO()
-        torch.save(initial_state, state_buffer)
-        problem_states[problem] = state_buffer.getvalue()
+        statement = problemset._statements[problem].statement
+        premises = problemset._statements[problem].premises
+        problem_data[problem] = (statement, premises)
     
     # Create workers if needed
     workers = []
     for i in range(min(num_workers, len(problems))):
-        workers.append(EvaluationWorker.remote(i % num_workers))
+        # When creating remote workers, need to handle the num_gpus argument
+        # based on whether GPUs are available
+        gpu_available = ray.cluster_resources().get("GPU", 0) > 0
+        
+        if gpu_available:
+            workers.append(EvaluationWorker.remote(i % num_workers))
+        else:
+            # Override the default GPU request with zero
+            workers.append(EvaluationWorker.options(num_gpus=0).remote(0))
     
     # Submit evaluation tasks
     tasks = []
     for i, problem in enumerate(problems):
         worker_idx = i % len(workers)
+        statement, premises = problem_data[problem]
         tasks.append(workers[worker_idx].evaluate_problem.remote(
-            agent_dump, problem, problem_states[problem]))
+            agent_dump, problem, theory_text, initial_library, statement, premises))
     
     # Collect results
     successes = ray.get(tasks)
@@ -241,9 +284,28 @@ def generate_conjectures_parallel(agent, context, n_conjectures: int,
     torch.save(agent, agent_buffer)
     agent_dump = agent_buffer.getvalue()
     
-    context_buffer = io.BytesIO()
-    torch.save(context, context_buffer)
-    context_dump = context_buffer.getvalue()
+    # Extract theory from context instead of serializing the entire context
+    theory_text = ""
+    if hasattr(context.derivation, '_theory_text'):
+        theory_text = context.derivation._theory_text
+    elif hasattr(context.derivation, 'serialize'):
+        theory_text = context.derivation.serialize()
+    else:
+        # Fallback: Try to find the theory by context
+        theory_path = os.path.join(os.path.dirname(__file__), 'theories')
+        for filename in os.listdir(theory_path):
+            if filename.endswith('.p'):
+                with open(os.path.join(theory_path, filename), 'r') as f:
+                    file_theory = f.read()
+                    # Create a test derivation and see if it can be incorporated
+                    test_d = peano.PyDerivation()
+                    try:
+                        test_d.incorporate(file_theory)
+                        theory_text = file_theory
+                        print(f"Using theory from {filename}")
+                        break
+                    except:
+                        pass
     
     # Determine how many conjectures each worker should generate
     conjs_per_worker = n_conjectures // num_workers
@@ -252,7 +314,15 @@ def generate_conjectures_parallel(agent, context, n_conjectures: int,
     # Create workers
     workers = []
     for i in range(num_workers):
-        workers.append(ConjectureWorker.remote(i % num_workers))
+        # When creating remote workers, need to handle the num_gpus argument
+        # based on whether GPUs are available
+        gpu_available = ray.cluster_resources().get("GPU", 0) > 0
+        
+        if gpu_available:
+            workers.append(ConjectureWorker.remote(i % num_workers))
+        else:
+            # Override the default GPU request with zero
+            workers.append(ConjectureWorker.options(num_gpus=0).remote(0))
     
     # Submit tasks
     tasks = []
@@ -260,7 +330,7 @@ def generate_conjectures_parallel(agent, context, n_conjectures: int,
         worker_conjs = conjs_per_worker + (1 if i < remainder else 0)
         if worker_conjs > 0:
             tasks.append(workers[i].generate_conjectures.remote(
-                agent_dump, context_dump, worker_conjs, proven_conjectures))
+                agent_dump, theory_text, worker_conjs, proven_conjectures))
     
     # Collect results
     conjecture_lists = ray.get(tasks)
@@ -284,7 +354,15 @@ def prove_conjectures_parallel(agent, theory: BackgroundTheory, conjectures: Lis
     # Create workers
     workers = []
     for i in range(min(num_workers, len(conjectures))):
-        workers.append(ProofWorker.remote(i % num_workers))
+        # When creating remote workers, need to handle the num_gpus argument
+        # based on whether GPUs are available
+        gpu_available = ray.cluster_resources().get("GPU", 0) > 0
+        
+        if gpu_available:
+            workers.append(ProofWorker.remote(i % num_workers))
+        else:
+            # Override the default GPU request with zero
+            workers.append(ProofWorker.options(num_gpus=0).remote(0))
     
     # Submit tasks
     tasks = []
@@ -372,6 +450,9 @@ async def teacher_loop(cfg: DictConfig):
             wandb.log({'test_success_rate': test_success_rate})
             torch.save(agent, f'{i}.pt')
 
+            # Create a fresh context for this iteration
+            d = peano.PyDerivation()
+            d.incorporate(theory)
             context = Context(d, None, [])
             
             # STEP 3: Generate conjectures in parallel
@@ -379,6 +460,20 @@ async def teacher_loop(cfg: DictConfig):
             conj_start_time = time.time()
             conjectures = generate_conjectures_parallel(
                 agent, context, cfg.n_conjectures, proven_conjectures, num_workers)
+            
+            # If we didn't get all the requested conjectures, try again in non-parallel mode as fallback
+            if len(conjectures) < cfg.n_conjectures:
+                print(f"Only generated {len(conjectures)} of {cfg.n_conjectures} conjectures in parallel mode. Trying sequential generation.")
+                
+                while len(conjectures) < cfg.n_conjectures:
+                    proposal = sample_conjecture(AgentLM(agent, 'Conj:(hard) '), context)
+                    
+                    if proposal and proposal not in conjectures + proven_conjectures:
+                        # Contract conjectures to make them Peano-parseable
+                        contracted_proposal = d.contract(proposal)
+                        if contracted_proposal not in conjectures + proven_conjectures:
+                            conjectures.append(contracted_proposal)
+                
             conj_end_time = time.time()
             
             print(now(), f'Done. Generated {len(conjectures)} conjectures, time: {conj_end_time - conj_start_time:.2f}s')
