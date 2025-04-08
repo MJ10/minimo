@@ -42,6 +42,24 @@ class ProofWorker:
     """Ray worker for proof search tasks."""
     
     def __init__(self, gpu_id: int = 0):
+        # Import necessary modules
+        import sys
+        import os
+        
+        # Add the current directory to the path so workers can find modules
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.append(current_dir)
+            
+        # Import modules needed by this worker
+        import torch
+        import peano
+        import policy
+        import proofsearch
+        import hindsight
+        import worker
+        from worker import StudentResult, BackgroundTheory
+        
         self.device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
         print(f"Initialized ProofWorker with device: {self.device}")
 
@@ -107,6 +125,21 @@ class EvaluationWorker:
     """Ray worker for evaluating the agent on test problems."""
     
     def __init__(self, gpu_id: int = 0):
+        # Import necessary modules
+        import sys
+        import os
+        
+        # Add the current directory to the path so workers can find modules
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.append(current_dir)
+            
+        # Import modules needed by this worker
+        import torch
+        import peano
+        import policy
+        import proofsearch
+        
         self.device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
         print(f"Initialized EvaluationWorker with device: {self.device}")
     
@@ -114,6 +147,13 @@ class EvaluationWorker:
                         initial_library: List[str], statement: str, premises: List[str]) -> bool:
         """Evaluate a specific problem."""
         try:
+            # Local imports to ensure these modules are available
+            import torch
+            import io
+            import peano
+            import proofsearch
+            import policy
+            
             # Load the agent
             with io.BytesIO(agent_dump) as f:
                 agent = torch.load(f, weights_only=False)
@@ -141,6 +181,23 @@ class ConjectureWorker:
     """Ray worker for generating conjectures."""
     
     def __init__(self, gpu_id: int = 0):
+        # Import necessary modules
+        import sys
+        import os
+        
+        # Add the current directory to the path so workers can find modules
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.append(current_dir)
+            
+        # Import modules needed by this worker
+        import torch
+        import peano
+        import policy
+        import proofsearch
+        import conjecture
+        from conjecture import AgentLM, Context, sample_conjecture
+        
         self.device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
         print(f"Initialized ConjectureWorker with device: {self.device}")
     
@@ -148,6 +205,15 @@ class ConjectureWorker:
                             proven_conjectures: List[str]) -> List[str]:
         """Generate conjectures using the provided agent."""
         try:
+            # Local imports to ensure these modules are available
+            import torch
+            import io
+            import peano
+            import proofsearch
+            import policy
+            import conjecture
+            from conjecture import AgentLM, Context, sample_conjecture
+            
             # Load the agent
             with io.BytesIO(agent_dump) as f:
                 agent = torch.load(f, weights_only=False)
@@ -383,7 +449,32 @@ def prove_conjectures_parallel(agent, theory: BackgroundTheory, conjectures: Lis
     return student_results
 
 
+def ensure_module_imports():
+    """Make sure all necessary modules are imported for Ray workers"""
+    # These need to be imported before Ray workers are started
+    import torch
+    import peano
+    import sys
+    import os
+    
+    # Add the current directory to the path so workers can find modules
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if current_dir not in sys.path:
+        sys.path.append(current_dir)
+    
+    # Make explicit imports of local modules
+    import policy
+    import proofsearch
+    import worker
+    import conjecture
+    import hindsight
+    import problems
+    import util
+
 async def teacher_loop(cfg: DictConfig):
+    # Make sure all modules are imported before creating workers
+    ensure_module_imports()
+    
     # Initialize Ray with GPU support
     num_workers = setup_ray(num_gpus_per_worker=1)
     print(f"Running in parallel mode with {num_workers} workers")
