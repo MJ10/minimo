@@ -1,6 +1,7 @@
 task: teacher
 
-test_problems: kleene
+# test_problems: kleene
+test_problems_path: ./extrinsic/propositional-logic.p
 defaults:
     - _self_
     - agent: mcts-lm
@@ -9,6 +10,8 @@ defaults:
 iterations: 5
 n_conjectures: 200
 
+num_eval_workers: 6
+num_workers: 6
 seed: 42
 
 difficulty_buckets:

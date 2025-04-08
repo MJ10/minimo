@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import collections
+import os
 from hydra.utils import to_absolute_path
 import peano
 
@@ -438,9 +439,24 @@ iff : [prop -> prop -> prop] = (lambda ('p1 : prop, 'p2 : prop) (and ['p1 -> 'p2
     )
 
 def load_kleene_fix():
-    theory = open(to_absolute_path('./theories/propositional-logic.p'), 'r').read()
-    problems_text = open(to_absolute_path('./extrinsic/propositional-logic.p'), 'r').readlines()
-    problems = [TheoremStatement(p.split(". ")[0], p.split(". ")[1], []) for p in problems_text]
+    # Determine paths relative to this file's directory
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    theory_path = os.path.join(current_dir, './theories/propositional-logic.p') # Use .. for relative path
+    problems_path = os.path.join(current_dir, './extrinsic/propositional-logic.p') # Use .. for relative path
+
+    try:
+        with open(theory_path, 'r') as f:
+            theory = f.read()
+        with open(problems_path, 'r') as f:
+            problems_text = f.readlines()
+    except FileNotFoundError as e:
+        # Provide more context in case of error
+        print(f"Error loading Kleene files: {e}")
+        print(f"Looked for theory at: {theory_path}")
+        print(f"Looked for problems at: {problems_path}")
+        raise e
+
+    problems = [TheoremStatement(p.split(". ")[0], p.split(". ")[1], []) for p in problems_text if ". " in p] # Ensure split is safe
     return ProblemSet(
         theory,
         ['and_i', 'and_el', 'and_er', 'or_il', 'or_ir', 'or_e',
