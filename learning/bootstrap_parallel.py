@@ -26,7 +26,7 @@ from problems import load_problemset
 import wandb
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
-from tactics import induce_tactics_from_proofs
+from tactic import induce_tactics_from_proofs
 import random
 
 def now() -> str:
@@ -312,9 +312,10 @@ def teacher_loop(cfg: DictConfig):
             # 3b- Induce tactics from successful proofs if enabled
             if cfg.get('induce_tactics', False):
                 new_tactics = induce_tactics_from_proofs(
-                    student_results, 
                     max_tactics=cfg.get('max_tactics', 5),
-                    min_occurrences=cfg.get('min_tactic_occurrences', 2)
+                    student_results=student_results, 
+                    min_occurrences=cfg.get('min_tactic_occurrences', 2),
+                    existing_tactics=len(induced_tactics)
                 )
                 
                 if new_tactics:
@@ -348,7 +349,7 @@ def teacher_loop(cfg: DictConfig):
                     # Update the agent with the new tactics if enabled
                     if cfg.get('use_induced_tactics', True):
                         from proofsearch import HolophrasmNode
-                        HolophrasmNode.set_tactics(induced_tactics)
+                        agent.set_tactics(induced_tactics)
                         print(f"Updated agent with {len(induced_tactics)} tactics")
 
             thresholds = [np.percentile(success_logprobs, p)

@@ -208,3 +208,19 @@ class TacticAction(ProofAction):
         
         return current_states
 
+    # ------------------------------------------------------------------
+    # Applicability check ------------------------------------------------
+    # ------------------------------------------------------------------
+
+    def is_applicable(self, state: 'peano.PyProofState') -> bool:
+        """Returns True if executing the tactic on *state* yields at least one
+        successor state.  It is a lightweight wrapper around *execute* that
+        avoids constructing TreeSearch nodes when the tactic clearly fails.
+        """
+        try:
+            next_states = self.execute(state)
+            return bool(next_states)
+        except Exception:
+            # If anything goes wrong we consider the tactic not applicable.
+            return False
+

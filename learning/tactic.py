@@ -60,7 +60,7 @@ def _utility(t: Tactic, matches: int) -> float:
     return matches * (len(t.steps) - 1) / _num_parameters(t)
 
 
-def induce_tactics_from_proofs(student_results: List[StudentResult], max_tactics: int = 5, min_occurrences: int = 2) -> List[Tactic]:
+def induce_tactics_from_proofs(student_results: List[StudentResult], max_tactics: int = 5, min_occurrences: int = 2, existing_tactics: int = 0) -> List[Tactic]:
     """Induce new tactics from previously-solved proofs.
 
     The procedure follows the description given in the prompt.  It proceeds
@@ -123,7 +123,7 @@ def induce_tactics_from_proofs(student_results: List[StudentResult], max_tactics
     scored.sort(key=lambda tup: tup[0], reverse=True)
     selected: List[Tactic] = []
     for rank, (util, tac, occur) in enumerate(scored[:max_tactics]):
-        tac.name = f'tactic_{rank}'
+        tac.name = f'tactic_{rank+existing_tactics}'
         print(f"[Tactic-Induction] Selected {tac.name}  util={util:.2f}  occur={occur}")
         selected.append(tac)
 

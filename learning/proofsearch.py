@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import random
+import os
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 import functools
@@ -12,7 +13,6 @@ import hydra
 from omegaconf import DictConfig
 import torch
 import wandb
-import os
 import json
 
 import peano
@@ -21,6 +21,12 @@ import policy
 from util import format_blocks_with_indent, sample_batch, setup_wandb, value_color, tqdm_if
 from action import ProofAction, TacticAction, Tactic, Step
 
+# ----------------------------------------------------------------------------
+# Optional debug flag – set environment variable DEBUG_TACTICS=1 to enable
+# verbose logging about tactic integration.
+# ----------------------------------------------------------------------------
+
+DEBUG_TACTICS = bool(os.environ.get('DEBUG_TACTICS'))
 
 @dataclass
 class GeneratedProofAction:
@@ -204,6 +210,9 @@ class HolophrasmNode(ProofStateNode):
     def set_tactics(cls, tactics: List[Tactic]):
         """Set the available tactics for all HolophrasmNodes."""
         cls._tactics = tactics
+        if DEBUG_TACTICS:
+            names = [t.name for t in tactics]
+            print(f"[DEBUG] HolophrasmNode.set_tactics – installed {len(names)} tactics: {names} (pid={os.getpid()})")
 
     @classmethod
     def get_tactics(cls) -> List[Tactic]:
@@ -224,7 +233,14 @@ class HolophrasmNode(ProofStateNode):
 
     @functools.cached_property
     def actions(self) -> list:
-        if self.is_terminal():
+        # A failed tactic execution produces a node with no proof states.  Treat
+        # it as having no available actions so MCTS will mark it as dead when
+        # it tries to expand it.
+        if self.is_terminal() or not self._proof_states:
+            return []
+
+        # Extra guard in case the failed-tactic flag is set explicitly.
+        if hasattr(self, '_is_failed_tactic') and self._is_failed_tactic:
             return []
 
         if self.is_conjunctive():
@@ -252,9 +268,15 @@ class HolophrasmNode(ProofStateNode):
             # Lazy nodes - straight actions from Peano.
             actions_list = [ProofAction([a]) for a in self._proof_states[0].actions()]
         
-        # Add tactics as actions
+        # Add tactics that are actually applicable in this state.
         for tactic in self._tactics:
-            actions_list.append(TacticAction(tactic))
+            ta = TacticAction(tactic)
+            if ta.is_applicable(self._proof_states[0]):
+                actions_list.append(ta)
+            
+        if DEBUG_TACTICS and any(isinstance(a, TacticAction) for a in actions_list):
+            tactic_names = [str(a) for a in actions_list if isinstance(a, TacticAction)]
+            print(f"[DEBUG] actions() – node goal='{self.goal()[:50]}...' has {len(tactic_names)} tactic actions: {tactic_names}")
             
         return actions_list
 
@@ -980,6 +1002,11 @@ class MonteCarloTreeSearch(Policy):
                 max_value = value
                 best_action_idx = i
 
+        if DEBUG_TACTICS and best_action_idx is not None:
+            chosen_action = node.children()[best_action_idx]._parent[1]
+            if isinstance(chosen_action, TacticAction):
+                print(f"[DEBUG] _uct – chose tactic {chosen_action} at depth node")
+
         if best_action_idx is None:
             # node is not itself dead, but all of its children are. Mark it as dead.
             node.mark_dead()
@@ -1032,7 +1059,61 @@ class ProofSearchAgent:
         self._checkpoints = 0
         self._examples = []
 
+        # Persisted list of induced tactics.  It is stored inside the agent so
+        # that when the agent object is serialized and shipped to worker
+        # processes the tactics arrive with it.  Every time we change this list
+        # we also push it to HolophrasmNode.
+        self._tactics: List[Tactic] = []
+
+    # ---------------------------------------------------------------------
+    # Tactic management helpers
+    # ---------------------------------------------------------------------
+
+    def _normalize_tactic(self, t) -> Tactic:
+        """Accepts either a real `Tactic` instance or a plain dict that was
+        deserialized from JSON and converts it into a proper object.
+        """
+        if isinstance(t, Tactic):
+            return t
+
+        # Assume dict-like schema {name: str, steps: [{arrows, arguments, result, branch?}]}
+        if isinstance(t, dict):
+            steps_raw = t.get('steps', [])
+            steps: List[Step] = []
+            for s in steps_raw:
+                if isinstance(s, Step):
+                    steps.append(s)
+                else:
+                    steps.append(
+                        Step(
+                            arrows=s.get('arrows', []),
+                            arguments=s.get('arguments', []),
+                            result=s.get('result', '?'),
+                            branch=s.get('branch', None),
+                        )
+                    )
+            return Tactic(t.get('name', f'tactic_{random.randint(0,10**6)}'), steps)
+
+        raise TypeError(f"Unsupported tactic representation: {type(t)}")
+
+    def set_tactics(self, tactics: List[Any]):
+        """Install a new tactic list.
+
+        Accepts either `Tactic` instances or the JSON-dict representation that
+        we store on disk.  Everything is normalized to real objects before
+        being stored.
+        """
+        normalized = [self._normalize_tactic(t) for t in tactics]
+        self._tactics = normalized
+        HolophrasmNode.set_tactics(normalized)
+
     def proof_search(self, problem, state):
+        # Make sure the search nodes created in this process know about the
+        # tactics carried by the agent (important when we unpickle the agent in
+        # a worker).
+        if self._tactics:
+            HolophrasmNode.set_tactics(self._tactics)
+
         root = TreeSearchNode(self._node_type([state]))
 
         node = root
