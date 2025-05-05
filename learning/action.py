@@ -133,79 +133,98 @@ class TacticAction(ProofAction):
         return True
         
     def execute(self, state: peano.PyProofState) -> peano.PyProofState:
-        """Execute the tactic on the given proof state."""
+        """Execute the tactic on the given proof state.
+
+        This rewritten version avoids brittle substring matching by
+        1.  Extracting the *exact* arrow name of every Peano action via
+            a simple token split (first token).
+        2.  Normalising tokens (stripping common punctuation) before
+            comparison so that, e.g., `(succ x)` and `succ x` both match.
+        3.  Using a small helper to perform argument substitution &
+            matching, allowing ``*`` wild-cards and placeholders that
+            refer to results of previous steps.
+        """
+        def _split_action(action_obj):
+            """Return `(arrow, [arg0, arg1, …])` from a Peano action."""
+            parts = str(action_obj).strip().split()
+            arrow = parts[0] if parts else ''
+            return arrow, parts[1:]
+
+        def _norm(tok: str) -> str:
+            """Remove common punctuation around a token for robust matching."""
+            return tok.strip(',()')
+
         current_states = [state]
-        result_substitutions = {}  # Maps from result placeholders to actual terms
-        
-        # Apply each step of the tactic in sequence
+        result_substitutions: dict[str, str] = {}
+
         for step in self.tactic.steps:
             if not current_states:
-                break
-                
-            # Get the current state to work with
-            current_state = current_states[0]
-            
-            # Find the matching action in the current state
-            found_action = False
-            for action in current_state.actions():
-                # Attempt to match the action with the step
-                action_str = str(action)
-                
-                for arrow in step.arrows:
-                    # Use exact matching instead of substring matching
-                    if action_str.startswith(arrow + " ") or action_str == arrow:
-                        # If this step has arguments, check if they match what we need
-                        if step.arguments:
-                            # Parse the action arguments
-                            action_parts = action_str.split(" ")
-                            if len(action_parts) > 1:  # Has arguments
-                                # Check if arguments match
-                                arg_match = True
-                                actual_args = []
-                                
-                                for arg in step.arguments:
-                                    # If the argument is a result reference from a previous step
-                                    if arg in result_substitutions:
-                                        actual_args.append(result_substitutions[arg])
-                                    else:
-                                        # Use the argument directly
-                                        actual_args.append(arg)
-                                
-                                # If arguments don't match or wrong number of arguments, continue to next action
-                                if len(actual_args) != len(action_parts) - 1:
-                                    continue
-                                    
-                                # Try to match each argument (this is a simple check, might need refinement)
-                                for i, arg in enumerate(actual_args):
-                                    if arg != action_parts[i + 1] and arg != "*":  # Allow "*" as wildcard
-                                        arg_match = False
-                                        break
-                                        
-                                if not arg_match:
-                                    continue
-                        
-                        # Found a matching action, execute it
-                        next_states = current_state.execute_action(action)
-                        if next_states:
-                            # If this step produces a result, store it in our substitutions
-                            if step.result:
-                                # For now, we'll just use the first construction from the last action
-                                # This is a simplification - in reality we might need more sophisticated logic
-                                construction = next_states[0].construction_from_last_action()
-                                if construction:
-                                    result_substitutions[step.result] = construction
-                            
-                            current_states = next_states
-                            found_action = True
-                            break
-                
-                if found_action:
-                    break
-            
-            # If no matching action was found, tactic execution fails
-            if not found_action:
+                # All branches failed.
                 return []
-        
+
+            next_states_acc: list[peano.PyProofState] = []
+
+            for current_state in current_states:
+                matched_in_this_state = False
+                for action in current_state.actions():
+                    arrow_name, act_args = _split_action(action)
+
+                    # Arrow must match one of the allowed names.
+                    if arrow_name not in step.arrows:
+                        continue
+
+                    # --- argument matching ---------------------------------
+                    if step.arguments:
+                        # Prepare expected arguments after substitution.
+                        expected_args: list[str] = []
+                        for arg in step.arguments:
+                            if arg in result_substitutions:
+                                expected_args.append(result_substitutions[arg])
+                            else:
+                                expected_args.append(arg)
+
+                        # Length must agree (unless wildcard absorbs the rest).
+                        if len(act_args) != len(expected_args):
+                            continue
+
+                        # Check each argument.
+                        ok = True
+                        for exp, real in zip(expected_args, act_args):
+                            exp_n, real_n = _norm(exp), _norm(real)
+                            if exp_n == '*' or exp_n == real_n:
+                                continue
+                            ok = False
+                            break
+                        if not ok:
+                            continue
+                    # -------------------------------------------------------
+
+                    # At this point we have a match; execute it.
+                    next_states = current_state.execute_action(action)
+                    if not next_states:
+                        continue
+
+                    # Register produced result if the step defines one.
+                    if step.result:
+                        construction = next_states[0].construction_from_last_action()
+                        if construction:
+                            result_substitutions[step.result] = construction
+
+                    next_states_acc.extend(next_states)
+                    matched_in_this_state = True
+                    # Do *not* break here – there might be alternative
+                    # actions in the same state that also match and we want
+                    # to explore every branch.
+                # end for action
+
+                if not matched_in_this_state:
+                    # This particular branch failed → discard it.
+                    continue
+            # end for current_state
+
+            # Advance to the union of successor states.
+            current_states = next_states_acc
+
         return current_states
 
     # ------------------------------------------------------------------

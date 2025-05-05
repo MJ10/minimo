@@ -26,7 +26,7 @@ from problems import load_problemset
 import wandb
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
-from tactic import induce_tactics_from_proofs
+from tactic import induce_tactics_from_proofs, rewrite_solutions
 import random
 
 def now() -> str:
@@ -321,6 +321,10 @@ def teacher_loop(cfg: DictConfig):
                 if new_tactics:
                     induced_tactics.extend(new_tactics)
                     print(f"Induced {len(new_tactics)} new tactics, total: {len(induced_tactics)}")
+                    
+                    # --- rewrite previously-found solutions so that policy
+                    # training uses compressed traces.
+                    rewrite_solutions(student_results, induced_tactics)
                     
                     # Save induced tactics
                     with open(f'tactics_{i}.json', 'w') as f:

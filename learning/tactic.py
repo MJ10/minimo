@@ -13,7 +13,7 @@ We reuse the canonical `Step` and `Tactic` definitions from
 class definitions with the same name.
 """
 
-from typing import List
+from typing import List, Optional, Any
 
 # Canonical definitions coming from the action module.
 from action import Step, Tactic  # noqa: F401 – re-export for external users
@@ -128,3 +128,128 @@ def induce_tactics_from_proofs(student_results: List[StudentResult], max_tactics
         selected.append(tac)
 
     return selected
+
+
+def _rewrite_action_sequence(action_seq: List[str], tactics: List[Tactic]) -> List[str]:
+    """Rewrite *action_seq* (flat list [arrow, args, arrow, args, …])
+    by replacing every longest-match occurrence of a tactic body with a
+    single *TACTIC:name* token followed by an empty argument placeholder.
+
+    The returned list still alternates [arrow, args] so downstream code
+    that expects even/odd indexing keeps working.
+    """
+    if not tactics:
+        return action_seq  # Nothing to rewrite.
+
+    # Ensure we have real Tactic objects (handles JSON-loaded dicts).
+    tactics = [_normalize_tactic(t) for t in tactics]
+
+    # Pre-compute a simple signature for quick matching: tuple of arrows.
+    tac_sig: dict[tuple[str, ...], Tactic] = {
+        tuple(step.arrows[0] for step in t.steps): t for t in tactics
+    }
+
+    # Convert seq into pairs (arrow, arg_str).
+    pairs: list[tuple[str, str]] = []
+    it = iter(action_seq)
+    for arrow in it:
+        arg = next(it, '')
+        pairs.append((arrow, arg))
+
+    out: list[tuple[str, str]] = []
+    i = 0
+    while i < len(pairs):
+        # Find the longest tactic that matches here.
+        best_tactic: Optional[Tactic] = None
+        best_len = 0
+        for sig, tac in tac_sig.items():
+            n = len(sig)
+            if i + n > len(pairs):
+                continue
+            slice_arrows = tuple(pairs[i + k][0] for k in range(n))
+            if slice_arrows != sig:
+                continue
+            # Also ensure arity match.
+            ok = True
+            for k, step in enumerate(tac.steps):
+                expected_arity = len(step.arguments)
+                actual_arity = len(pairs[i + k][1].split()) if pairs[i + k][1] else 0
+                if expected_arity != actual_arity:
+                    ok = False
+                    break
+            if ok and n > best_len:
+                best_tactic = tac
+                best_len = n
+        if best_tactic is not None:
+            out.append((f'TACTIC:{best_tactic.name}', ''))
+            i += best_len
+        else:
+            out.append(pairs[i])
+            i += 1
+
+    # Flatten back.
+    flat: list[str] = []
+    for arrow, arg in out:
+        flat.append(arrow)
+        flat.append(arg)
+    return flat
+
+
+def rewrite_solutions(student_results: List[StudentResult], tactics: List[Tactic]):
+    """In-place rewrite of *solution_actions* of each *StudentResult*.
+
+    Only successful proofs that already have solution_actions are touched.
+    """
+    if not tactics:
+        return
+
+    for sr in student_results:
+        if sr.success and sr.solution_actions:
+            sr.solution_actions = _rewrite_action_sequence(sr.solution_actions, tactics)
+
+# Helper -----------------------------------------------------------------------
+
+
+def _normalize_tactic(t) -> Tactic:
+    """Ensure *t* is a proper ``Tactic`` instance.
+
+    The training scripts sometimes store tactics on disk as plain Python
+    dictionaries (via :pyfunc:`json.dump`).  When they are loaded back we
+    therefore receive a list of ``dict`` objects that follow this schema::
+
+        {
+          "name": "tactic_0",
+          "steps": [
+            {"arrows": ["apply"], "arguments": ["!step0"], "result": "?0"},
+            ...
+          ]
+        }
+
+    This helper converts such dicts to proper :class:`Tactic` objects so the
+    rest of the code can assume a uniform representation.
+    """
+
+    # Fast-path: already the right type.
+    if isinstance(t, Tactic):
+        return t
+
+    # JSON/dict representation --------------------------------------------------
+    if isinstance(t, dict):
+        steps_raw = t.get("steps", [])
+        steps: List[Step] = []
+        for s in steps_raw:
+            if isinstance(s, Step):
+                steps.append(s)
+            else:
+                steps.append(
+                    Step(
+                        arrows=s.get("arrows", []),
+                        arguments=s.get("arguments", []),
+                        result=s.get("result", "?"),
+                        branch=s.get("branch", None),
+                    )
+                )
+        return Tactic(t.get("name", "tactic_json"), steps)
+
+    # Anything else is unexpected.
+    raise TypeError(f"Unsupported tactic representation: {type(t)}")
