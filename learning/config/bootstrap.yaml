@@ -10,6 +10,9 @@ defaults:
 iterations: 5
 n_conjectures: 200
 
+num_gpus: 1
+num_workers_per_gpu: 1
+
 num_eval_workers: 6
 num_workers: 6
 seed: 42

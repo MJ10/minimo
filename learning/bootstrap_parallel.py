@@ -14,6 +14,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 import torch.multiprocessing as mp
+import gc  # For explicit garbage collection to prevent memory leaks
 
 import peano
 import worker
@@ -51,10 +52,49 @@ def set_seed(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+_WORKER_GPU_COUNT = None  # Will be set once during pool initialisation.
+
+
+def _init_worker(num_gpus: int):
+    """Initializer for each worker process.
+
+    The function assigns a deterministic GPU to the worker based on its
+    process identity and the total number of available GPUs.  The rule is
+    simple:   gpu_id = (worker_index % num_gpus)
+
+    Using `torch.cuda.set_device` guarantees that all subsequent CUDA
+    allocations in this process land on *that* GPU, so we do not need to pass
+    the gpu_id around after initialisation.
+    """
+    global _WORKER_GPU_COUNT
+    _WORKER_GPU_COUNT = num_gpus
+
+    if num_gpus == 0 or not torch.cuda.is_available():
+        return  # CPU-only execution
+
+    # Worker indices are 1-based in multiprocessing.
+    worker_idx = mp.current_process()._identity[0] - 1 if mp.current_process()._identity else 0
+    gpu_id = worker_idx % num_gpus
+    torch.cuda.set_device(gpu_id)
+
 
 def _prove(agent_dump: bytes, theory: worker.BackgroundTheory, statement: str, is_eval: bool = False):
+    """Run proof search for a single statement on the *current* CUDA device.
+
+    It is assumed that each worker process has set the appropriate CUDA device
+    via the `_init_worker` initializer. We therefore map all storages to the
+    currently-active device when deserialising the agent.  This prevents the
+    accidental placement of multiple agents on the same GPU and avoids
+    cross-device memory leaks.
+    """
+
+    current_device = torch.device(
+        f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
+    )
+
+    # Load the agent onto the current device only.
     with io.BytesIO(agent_dump) as f:
-        agent = torch.load(f, weights_only=False)
+        agent = torch.load(f, map_location=current_device, weights_only=False)
 
     print('Proving', statement, 'on', agent._policy._lm._lm.device)
 
@@ -104,6 +144,13 @@ def _prove(agent_dump: bytes, theory: worker.BackgroundTheory, statement: str, i
         print(tb)
         return StudentResult(tb, False, statement, None, None, [],
                              [], None, None)
+    finally:
+        # Ensure GPU memory is released before the next task is executed.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if 'agent' in locals():
+            del agent
+        gc.collect()
 
 
 def load_problems(problems_path: str):
@@ -115,40 +162,53 @@ def load_problems(problems_path: str):
     return problems
 
 
-def test_on_pset(agent, theory: worker.BackgroundTheory, test_problems_path: str, num_workers: int = 4):
+def test_on_pset(
+    agent,
+    theory: worker.BackgroundTheory,
+    test_problems_path: str,
+    num_gpus: int = 1,
+    num_workers_per_gpu: int = 1,
+):
     """
-    Tests the agent on a given problemset in parallel.
+    Tests the agent on a given problem set in parallel with optional multi-GPU
+    support.
 
     Args:
         agent: The agent object to test.
-        problemset_cfg: The configuration DictConfig for loading the problemset.
-        num_workers: Number of parallel processes to use.
+        theory: Background theory to use.
+        test_problems_path: Path to the file containing evaluation problems.
+        num_gpus: Number of GPUs to distribute the work over.  If 0 or `None`,
+                  evaluation will run on CPU only.
+        num_workers_per_gpu: Number of concurrent worker processes to launch
+                              per GPU.
     """
     # Load problemset once to get names (could also pass names directly)
     problems = load_problems(test_problems_path)
     if not problems:
         return 0.0
 
-    # Serialize the agent's state
+    # Serialize the agent's state once and hand the bytes to every worker.
     buff = io.BytesIO()
-    # Note: Saving the whole agent might be large. If possible, saving only
-    # the model state_dict() and relevant config, then reconstructing
-    # the agent in the worker might be more efficient if the agent object
-    # itself is complex but the core model is standard.
-    # For now, we save the whole agent as done in the main loop.
     torch.save(agent, buff)
     agent_dump = buff.getvalue()
 
     tasks = [(agent_dump, theory, problem) for problem in problems]
 
     successes = {}
-    # Use context manager for the pool
-    # Limit workers if fewer problems than workers
-    actual_workers = min(num_workers, len(problems), os.cpu_count())
-    print(f"Evaluating {len(problems)} problems using {actual_workers} workers...")
 
-    with mp.Pool(processes=actual_workers) as pool:
-        # Use starmap to pass arguments tuple
+    # Determine how many worker processes to spin up.
+    total_requested_workers = (num_gpus or 1) * num_workers_per_gpu
+    actual_workers = min(total_requested_workers, len(problems), os.cpu_count())
+    print(
+        f"Evaluating {len(problems)} problems using {actual_workers} workers "
+        f"across {num_gpus} GPU(s)."
+    )
+
+    with mp.Pool(
+        processes=actual_workers,
+        initializer=_init_worker,
+        initargs=(num_gpus,),
+    ) as pool:
         results = pool.starmap(_prove, tasks)
 
     # Process results
@@ -217,9 +277,20 @@ def teacher_loop(cfg: DictConfig):
     with open('log.jsonl', 'w') as log:
         for i in range(start_iteration, cfg.iterations):
             # Pass the problemset config and desired number of workers
-            num_eval_workers = cfg.get('num_eval_workers', 4) # Default to 4 workers if not specified
-            test_success_rate = test_on_pset(agent, worker.BackgroundTheory(theory, premises),
-                                              cfg.test_problems_path, num_workers=num_eval_workers)
+            # ------------------------------------------------------------------
+            # Evaluation on held-out problem set
+            # ------------------------------------------------------------------
+
+            num_gpus = min(cfg.get('num_gpus', torch.cuda.device_count()), torch.cuda.device_count())
+            num_workers_per_gpu = cfg.get('num_workers_per_gpu', cfg.get('num_workers', 1))
+
+            test_success_rate = test_on_pset(
+                agent,
+                worker.BackgroundTheory(theory, premises),
+                cfg.test_problems_path,
+                num_gpus=num_gpus,
+                num_workers_per_gpu=num_workers_per_gpu,
+            )
             print('Test success rate:', test_success_rate)
             log.write(json.dumps({'iteration': i,
                                   'msg': f'Test success rate: {test_success_rate}'}))
@@ -270,12 +341,21 @@ def teacher_loop(cfg: DictConfig):
 
             # Use context manager for the pool
             # Limit workers if fewer problems than workers
-            num_workers = cfg.get('num_workers', 4)
-            actual_workers = min(num_workers, len(conjectures), os.cpu_count())
-            print(f"Proving {len(conjectures)} conjectures using {actual_workers} workers...")
+            num_gpus = min(cfg.get('num_gpus', torch.cuda.device_count()), torch.cuda.device_count())
+            num_workers_per_gpu = cfg.get('num_workers_per_gpu', cfg.get('num_workers', 1))
+            total_requested_workers = (num_gpus or 1) * num_workers_per_gpu
+            actual_workers = min(total_requested_workers, len(conjectures), os.cpu_count())
 
-            with mp.Pool(processes=actual_workers) as pool:
-                # Use starmap to pass arguments tuple
+            print(
+                f"Proving {len(conjectures)} conjectures using {actual_workers} workers "
+                f"across {num_gpus} GPU(s)."
+            )
+
+            with mp.Pool(
+                processes=actual_workers,
+                initializer=_init_worker,
+                initargs=(num_gpus,),
+            ) as pool:
                 results = pool.starmap(_prove, tasks)
 
             student_results = results
@@ -324,7 +404,7 @@ def teacher_loop(cfg: DictConfig):
                     
                     # --- rewrite previously-found solutions so that policy
                     # training uses compressed traces.
-                    rewrite_solutions(student_results, induced_tactics)
+                    student_results = rewrite_solutions(student_results, induced_tactics)
                     
                     # Save induced tactics
                     with open(f'tactics_{i}.json', 'w') as f:

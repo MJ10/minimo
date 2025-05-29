@@ -414,9 +414,8 @@ async def teacher_loop(cfg: DictConfig):
                     
                     # Update the agent with the new tactics if enabled
                     if cfg.get('use_induced_tactics', True):
-                        from proofsearch import HolophrasmNode
-                        HolophrasmNode.set_tactics(induced_tactics)
-                        print(f"Updated agent with {len(induced_tactics)} tactics")
+                        agent.set_tactics(induced_tactics)
+                        print(f"Updated agent with {len(induced_tactics)} tactics (process {os.getpid()})")
 
             thresholds = [np.percentile(success_logprobs, p)
                           for _, p in difficulty_buckets]

@@ -19,6 +19,7 @@ from typing import List, Optional, Any
 from action import Step, Tactic  # noqa: F401 – re-export for external users
 
 from worker import StudentResult
+from dataclasses import replace
 
 def _tactic_signature(t: Tactic):
     """Return a hashable descriptor of a tactic's *structure* (arrows + arity).
@@ -195,17 +196,24 @@ def _rewrite_action_sequence(action_seq: List[str], tactics: List[Tactic]) -> Li
     return flat
 
 
-def rewrite_solutions(student_results: List[StudentResult], tactics: List[Tactic]):
-    """In-place rewrite of *solution_actions* of each *StudentResult*.
+def rewrite_solutions(student_results: List[StudentResult], tactics: List[Tactic]) -> List[StudentResult]:
+    """Rewrite *solution_actions* of each *StudentResult* and return new objects.
 
     Only successful proofs that already have solution_actions are touched.
+    Original objects are not modified.
     """
     if not tactics:
-        return
+        return [replace(sr) for sr in student_results]
 
+    new_student_results = []
     for sr in student_results:
         if sr.success and sr.solution_actions:
-            sr.solution_actions = _rewrite_action_sequence(sr.solution_actions, tactics)
+            new_solution_actions = _rewrite_action_sequence(sr.solution_actions, tactics)
+            new_sr = replace(sr, solution_actions=new_solution_actions)
+            new_student_results.append(new_sr)
+        else:
+            new_student_results.append(replace(sr))
+    return new_student_results
 
 # Helper -----------------------------------------------------------------------
 
