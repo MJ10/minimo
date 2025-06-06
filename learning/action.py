@@ -97,11 +97,21 @@ class Tactic:
             result = f'?{i}'
             rewrites[f'!step{start_index + i}'] = result
             
-            # Rewrite argument names based on previous steps
+            # Rewrite argument names based on previous steps.  We keep
+            # placeholders that refer to earlier steps ("!stepX") or
+            # internal results ("?i") intact so that the matcher can
+            # substitute them at execution time.  Every *other* concrete
+            # identifier can be abstracted to a wildcard "*" when
+            # `abstract_constants` is requested.  This makes the
+            # resulting tactic more broadly applicable because it no longer
+            # depends on the exact variable names used in the original
+            # proof.
             rewritten_args = []
             for arg in args:
                 if arg in rewrites:
                     rewritten_args.append(rewrites[arg])
+                elif abstract_constants:
+                    rewritten_args.append('*')
                 else:
                     rewritten_args.append(arg)
             

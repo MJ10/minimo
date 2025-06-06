@@ -193,6 +193,7 @@ def _rewrite_action_sequence(action_seq: List[str], tactics: List[Tactic]) -> Li
     for arrow, arg in out:
         flat.append(arrow)
         flat.append(arg)
+
     return flat
 
 

@@ -482,9 +482,18 @@ def teacher_loop(cfg: DictConfig):
                 print(len(examples), 'accumulated training examples.')
                 agent.train(examples)
 
+            # Re-serialize the agent after it has been updated with tactics
+            if induced_tactics and cfg.get('use_induced_tactics', True):
+                print("Re-serializing agent with tactics for test evaluation...")
+                buff = io.BytesIO()
+                torch.save(agent, buff)
+                agent_dump_with_tactics = buff.getvalue()
+            else:
+                agent_dump_with_tactics = agent_dump
+
             # After inducing tactics, re-run proof search on test conjectures
             tasks_after_tactics = [
-                (agent_dump, worker.BackgroundTheory(theory, premises), conjecture)
+                (agent_dump_with_tactics, worker.BackgroundTheory(theory, premises), conjecture)
                 for conjecture in test_conjectures
             ]
 
