@@ -257,27 +257,15 @@ def test_on_pset(
         f"Evaluating {len(problems)} problems using {actual_workers} workers across {num_gpus} GPU(s)."
     )
 
-    # Create pool with proper cleanup
-    pool = None
-    try:
-        pool = mp.Pool(
-            processes=actual_workers,
-            initializer=_init_worker,
-            initargs=(num_gpus, num_workers_per_gpu),
-        )
-        
+    # Use context manager for automatic cleanup
+    with mp.Pool(
+        processes=actual_workers,
+        initializer=_init_worker,
+        initargs=(num_gpus, num_workers_per_gpu),
+    ) as pool:
         # Use timeout wrapper
         prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
         results = pool.starmap(prove_func, tasks)
-        
-    finally:
-        if pool is not None:
-            pool.close()
-            pool.join()
-            pool.terminate()
-            
-            # Wait a bit for cleanup
-            time.sleep(0.5)
 
     # Process results
     for result in results:
@@ -423,76 +411,34 @@ def teacher_loop(cfg: DictConfig):
 
             tasks = [(agent_dump, worker.BackgroundTheory(theory, premises), conjecture) for conjecture in train_conjectures]
 
-            # ---------------- Training conjectures proof search ----------------
+            # ---------------- Proof search with consolidated pool ----------------
             num_gpus = min(cfg.get('num_gpus', torch.cuda.device_count()), torch.cuda.device_count())
             num_workers_per_gpu = cfg.get('num_workers_per_gpu', cfg.get('num_workers', 1))
             total_requested_workers = (num_gpus or 1) * num_workers_per_gpu
-            actual_workers = min(total_requested_workers, len(train_conjectures), os.cpu_count())
+            max_tasks = max(len(train_conjectures), len(test_conjectures))
+            actual_workers = min(total_requested_workers, max_tasks, os.cpu_count())
 
             print(
-                f"Proving {len(train_conjectures)} conjectures using {actual_workers} workers across {num_gpus} GPU(s)."
+                f"Using consolidated pool with {actual_workers} workers across {num_gpus} GPU(s)."
             )
 
-            # Create pool with proper cleanup
-            pool = None
-            try:
-                pool = mp.Pool(
-                    processes=actual_workers,
-                    initializer=_init_worker,
-                    initargs=(num_gpus, num_workers_per_gpu),
-                )
-                
-                # Use timeout wrapper
+            # Create consolidated pool using context manager
+            with mp.Pool(
+                processes=actual_workers,
+                initializer=_init_worker,
+                initargs=(num_gpus, num_workers_per_gpu),
+            ) as pool:
+                # Proof search for training conjectures
+                print(f"Proving {len(train_conjectures)} training conjectures...")
                 prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
                 results = pool.starmap(prove_func, tasks)
                 
-            finally:
-                if pool is not None:
-                    pool.close()
-                    pool.join()
-                    pool.terminate()
-                    
-                    # Wait for cleanup
-                    time.sleep(0.5)
-
-            # Force cleanup after pool
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            test_tasks = [(agent_dump, worker.BackgroundTheory(theory, premises), conjecture, False) for conjecture in test_conjectures]
-
-            # Proof search for test conjectures (before tactics)
-            total_requested_workers = (num_gpus or 1) * num_workers_per_gpu
-            actual_workers = min(total_requested_workers, len(test_conjectures), os.cpu_count())
-
-            print(
-                f"Proving {len(test_conjectures)} conjectures using {actual_workers} workers across {num_gpus} GPU(s)."
-            )
-
-            # Create pool with proper cleanup
-            pool = None
-            try:
-                pool = mp.Pool(
-                    processes=actual_workers,
-                    initializer=_init_worker,
-                    initargs=(num_gpus, num_workers_per_gpu),
-                )
-                
-                # Use timeout wrapper
-                prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
+                # Proof search for test conjectures (before tactics)
+                test_tasks = [(agent_dump, worker.BackgroundTheory(theory, premises), conjecture, False) for conjecture in test_conjectures]
+                print(f"Proving {len(test_conjectures)} test conjectures...")
                 test_results = pool.starmap(prove_func, test_tasks)
-                
-            finally:
-                if pool is not None:
-                    pool.close()
-                    pool.join() 
-                    pool.terminate()
-                    
-                    # Wait for cleanup
-                    time.sleep(0.5)
 
-            # Force cleanup after pool
+            # Force cleanup after pool closes automatically
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -646,36 +592,20 @@ def teacher_loop(cfg: DictConfig):
                 for conjecture in test_conjectures
             ]
 
-            total_requested_workers = (num_gpus or 1) * num_workers_per_gpu
-            actual_workers = min(total_requested_workers, len(test_conjectures), os.cpu_count())
-
             print(
-                f"Proving {len(test_conjectures)} conjectures using {actual_workers} workers across {num_gpus} GPU(s) (after tactics)."
+                f"Proving {len(test_conjectures)} conjectures after tactics using {actual_workers} workers across {num_gpus} GPU(s)."
             )
 
-            # Create pool with proper cleanup
-            pool = None
-            try:
-                pool = mp.Pool(
-                    processes=actual_workers,
-                    initializer=_init_worker,
-                    initargs=(num_gpus, num_workers_per_gpu),
-                )
-                
-                # Use timeout wrapper
+            # Use context manager for tactics evaluation pool
+            with mp.Pool(
+                processes=actual_workers,
+                initializer=_init_worker,
+                initargs=(num_gpus, num_workers_per_gpu),
+            ) as pool:
                 prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
                 test_results_after_tactics = pool.starmap(prove_func, tasks_after_tactics)
-                
-            finally:
-                if pool is not None:
-                    pool.close()
-                    pool.join()
-                    pool.terminate()
-                    
-                    # Wait for cleanup
-                    time.sleep(0.5)
 
-            # Force cleanup after pool
+            # Force cleanup after pool closes automatically
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
