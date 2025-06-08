@@ -191,39 +191,59 @@ def _prove(agent_dump: bytes, theory: worker.BackgroundTheory, statement: str, i
 
 
 def _prove_with_timeout(tasks, num_workers, timeout_per_problem, num_gpus, num_workers_per_gpu):
-    """Execute proof tasks with proper timeout using ProcessPoolExecutor."""
+    """Execute proof tasks with proper timeout using ProcessPoolExecutor with batching."""
     results = []
+    batch_size = num_workers  # Process in batches to avoid pool corruption
     
-    with ProcessPoolExecutor(
-        max_workers=num_workers,
-        initializer=_init_worker,
-        initargs=(num_gpus, num_workers_per_gpu),
-    ) as executor:
-        # Submit all tasks
-        futures = []
-        for task in tasks:
-            future = executor.submit(_prove, *task)
-            futures.append(future)
+    for batch_start in range(0, len(tasks), batch_size):
+        batch_end = min(batch_start + batch_size, len(tasks))
+        batch_tasks = tasks[batch_start:batch_end]
         
-        # Collect results with individual timeouts
-        for i, future in enumerate(tqdm(futures, desc="Processing proofs")):
-            try:
-                result = future.result(timeout=timeout_per_problem)
-                results.append(result)
-            except FutureTimeoutError:
-                statement = tasks[i][2] if len(tasks[i]) > 2 else "unknown"
-                print(f"Timeout proving {statement} after {timeout_per_problem}s")
-                timeout_result = StudentResult(
-                    ["Timeout"], False, statement, None, None, [], [], None, None
-                )
-                results.append(timeout_result)
-            except Exception as e:
-                statement = tasks[i][2] if len(tasks[i]) > 2 else "unknown"
-                print(f"Error proving {statement}: {e}")
-                error_result = StudentResult(
-                    [str(e)], False, statement, None, None, [], [], None, None
-                )
-                results.append(error_result)
+        print(f"Processing batch {batch_start//batch_size + 1}/{(len(tasks) + batch_size - 1)//batch_size} ({len(batch_tasks)} tasks)")
+        
+        # Create fresh executor for each batch to avoid corruption
+        with ProcessPoolExecutor(
+            max_workers=min(num_workers, len(batch_tasks)),
+            initializer=_init_worker,
+            initargs=(num_gpus, num_workers_per_gpu),
+        ) as executor:
+            # Submit batch tasks
+            futures = []
+            for task in batch_tasks:
+                future = executor.submit(_prove, *task)
+                futures.append(future)
+            
+            # Collect results with individual timeouts
+            batch_results = []
+            for i, future in enumerate(tqdm(futures, desc=f"Batch {batch_start//batch_size + 1} proofs")):
+                try:
+                    result = future.result(timeout=timeout_per_problem)
+                    batch_results.append(result)
+                except FutureTimeoutError:
+                    statement = batch_tasks[i][2] if len(batch_tasks[i]) > 2 else "unknown"
+                    print(f"Timeout proving {statement} after {timeout_per_problem}s")
+                    timeout_result = StudentResult(
+                        ["Timeout"], False, statement, None, None, [], [], None, None
+                    )
+                    batch_results.append(timeout_result)
+                    # Cancel the future to prevent executor corruption
+                    future.cancel()
+                except Exception as e:
+                    statement = batch_tasks[i][2] if len(batch_tasks[i]) > 2 else "unknown"
+                    print(f"Error proving {statement}: {e}")
+                    error_result = StudentResult(
+                        [str(e)], False, statement, None, None, [], [], None, None
+                    )
+                    batch_results.append(error_result)
+                    # Cancel the future to prevent executor corruption
+                    future.cancel()
+            
+            results.extend(batch_results)
+        
+        # Force cleanup between batches
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     return results
 
