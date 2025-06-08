@@ -10,8 +10,14 @@ defaults:
 iterations: 5
 n_conjectures: 200
 
-num_gpus: 1
-num_workers_per_gpu: 1
+# Multiprocessing and GPU settings
+num_gpus: 4  # Number of GPUs to use
+num_workers_per_gpu: 2  # Workers per GPU (reduce if you see memory issues)
+timeout_per_problem: 150  # Timeout in seconds for each proof search
+
+# Add these environment variables to your launch script:
+# export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+# export CUDA_LAUNCH_BLOCKING=1  # For debugging only, remove in production
 
 num_eval_workers: 6
 num_workers: 6

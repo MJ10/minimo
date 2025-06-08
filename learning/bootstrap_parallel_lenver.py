@@ -15,6 +15,9 @@ import numpy as np
 from tqdm import tqdm
 import torch.multiprocessing as mp
 import gc  # For explicit garbage collection
+import time
+import signal
+from functools import partial
 
 import peano
 import worker
@@ -53,40 +56,101 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 _WORKER_GPU_COUNT = None  # Populated in initializer
+_WORKER_ID = None  # Track worker ID for debugging
 
 
-def _init_worker(num_gpus: int):
-    """Set the proper CUDA device for each worker process."""
-    global _WORKER_GPU_COUNT
+def _init_worker(num_gpus: int, workers_per_gpu: int):
+    """Set the proper CUDA device for each worker process.
+    
+    Multiple workers can share the same GPU - PyTorch/CUDA handles this well.
+    We distribute workers evenly across available GPUs.
+    """
+    global _WORKER_GPU_COUNT, _WORKER_ID
     _WORKER_GPU_COUNT = num_gpus
 
+    # Get worker ID for debugging
+    worker_info = mp.current_process()._identity
+    _WORKER_ID = worker_info[0] if worker_info else 0
+
     if num_gpus == 0 or not torch.cuda.is_available():
+        print(f"Worker {_WORKER_ID}: Running on CPU")
         return  # CPU-only
 
-    # Worker indices are 1-based in multiprocessing.
-    worker_idx = mp.current_process()._identity[0] - 1 if mp.current_process()._identity else 0
-    gpu_id = worker_idx % num_gpus
+    # Distribute workers across GPUs
+    # For example, with 4 GPUs and 8 workers (2 per GPU):
+    # Workers 1,2 -> GPU 0
+    # Workers 3,4 -> GPU 1
+    # Workers 5,6 -> GPU 2
+    # Workers 7,8 -> GPU 3
+    worker_idx = _WORKER_ID - 1  # Convert to 0-based
+    gpu_id = worker_idx // workers_per_gpu
+    
+    # Handle case where we have more workers than evenly distributable
+    if gpu_id >= num_gpus:
+        gpu_id = worker_idx % num_gpus
+    
+    # Set CUDA device for this worker
     torch.cuda.set_device(gpu_id)
+    
+    # Enable CUDA memory allocation strategies for better multi-process behavior
+    # This allows better memory sharing between processes on the same GPU
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+    
+    # Set CUDA to not reserve all memory upfront
+    if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
+        # Reserve only a fraction of GPU memory per process
+        # This allows multiple processes to share the GPU
+        memory_fraction = 0.9 / workers_per_gpu  # Leave 10% free
+        torch.cuda.set_per_process_memory_fraction(memory_fraction, gpu_id)
+    
+    print(f"Worker {_WORKER_ID}: Assigned to GPU {gpu_id} (sharing with {workers_per_gpu} workers)")
+
+
+def _timeout_handler(signum, frame):
+    raise TimeoutError("Proof search timed out")
+
+
+def _prove_with_timeout(agent_dump: bytes, theory: worker.BackgroundTheory, statement: str, is_eval: bool = False, timeout: int = 300):
+    """Wrapper to add timeout to proof search."""
+    # Set up signal handler for timeout
+    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(timeout)
+    
+    try:
+        result = _prove(agent_dump, theory, statement, is_eval)
+        signal.alarm(0)  # Cancel the alarm
+        return result
+    except TimeoutError:
+        print(f"Timeout proving {statement} after {timeout}s")
+        return StudentResult(["Timeout"], False, statement, None, None, [], [], None, None)
+    finally:
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def _prove(agent_dump: bytes, theory: worker.BackgroundTheory, statement: str, is_eval: bool = False):
     """Run proof search on the *current* CUDA device assigned to this worker."""
+    
+    # Clear any existing CUDA cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
     current_device = torch.device(
         f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
     )
 
-    # Deserialize agent onto the current device only.
-    with io.BytesIO(agent_dump) as f:
-        agent = torch.load(f, map_location=current_device, weights_only=False)
-
-    print('Proving', statement, 'on', agent._policy._lm._lm.device)
-
-    state = peano.PyProofState(theory.theory,
-                               theory.premises,
-                               statement)
-    
+    agent = None
     try:
+        # Deserialize agent onto the current device only.
+        with io.BytesIO(agent_dump) as f:
+            agent = torch.load(f, map_location=current_device, weights_only=False)
+
+        print(f'Worker {_WORKER_ID}: Proving {statement} on {current_device}')
+
+        state = peano.PyProofState(theory.theory,
+                                   theory.premises,
+                                   statement)
+        
         agent_result = agent.proof_search(statement, state)
 
         
@@ -124,17 +188,24 @@ def _prove(agent_dump: bytes, theory: worker.BackgroundTheory, statement: str, i
         )
     except BaseException as e:
         tb = traceback.format_exception(e)
-        print('Error in try_prove!')
-        print(tb)
+        print(f'Worker {_WORKER_ID}: Error in _prove!')
+        print(''.join(tb))
         return StudentResult(tb, False, statement, None, None, [],
                              [], None, None)
     finally:
-        # Release GPU memory explicitly.
+        # Aggressive cleanup
+        if 'agent' in locals() and agent is not None:
+            del agent
+        if 'agent_result' in locals():
+            del agent_result
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Clear GPU memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        if 'agent' in locals():
-            del agent
-        gc.collect()
+            torch.cuda.synchronize()
 
 
 def load_problems(problems_path: str):
@@ -152,14 +223,18 @@ def test_on_pset(
     test_problems_path: str,
     num_gpus: int = 1,
     num_workers_per_gpu: int = 1,
+    timeout_per_problem: int = 300,
 ):
     """
     Tests the agent on a given problemset in parallel.
 
     Args:
         agent: The agent object to test.
-        problemset_cfg: The configuration DictConfig for loading the problemset.
-        num_workers: Number of parallel processes to use.
+        theory: The background theory.
+        test_problems_path: Path to test problems.
+        num_gpus: Number of GPUs to use.
+        num_workers_per_gpu: Number of workers per GPU.
+        timeout_per_problem: Timeout in seconds for each problem.
     """
     # Load problemset once to get names (could also pass names directly)
     problems = load_problems(test_problems_path)
@@ -171,7 +246,8 @@ def test_on_pset(
     torch.save(agent, buff)
     agent_dump = buff.getvalue()
 
-    tasks = [(agent_dump, theory, problem) for problem in problems]
+    # Prepare tasks with timeout wrapper
+    tasks = [(agent_dump, theory, problem, True) for problem in problems]
 
     successes = {}
 
@@ -181,12 +257,27 @@ def test_on_pset(
         f"Evaluating {len(problems)} problems using {actual_workers} workers across {num_gpus} GPU(s)."
     )
 
-    with mp.Pool(
-        processes=actual_workers,
-        initializer=_init_worker,
-        initargs=(num_gpus,),
-    ) as pool:
-        results = pool.starmap(_prove, tasks)
+    # Create pool with proper cleanup
+    pool = None
+    try:
+        pool = mp.Pool(
+            processes=actual_workers,
+            initializer=_init_worker,
+            initargs=(num_gpus, num_workers_per_gpu),
+        )
+        
+        # Use timeout wrapper
+        prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
+        results = pool.starmap(prove_func, tasks)
+        
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+            pool.terminate()
+            
+            # Wait a bit for cleanup
+            time.sleep(0.5)
 
     # Process results
     for result in results:
@@ -198,12 +289,18 @@ def test_on_pset(
 
     print(f"Evaluation complete: {num_successful}/{total_problems} successful.")
 
+    # Force cleanup
+    del agent_dump
+    gc.collect()
+
     return num_successful / total_problems if total_problems > 0 else 0.0
 
 
 def teacher_loop(cfg: DictConfig):
-    agent = make_agent(cfg)
-
+    # Delay agent creation to avoid CUDA initialization in parent
+    print("Initializing teacher loop...")
+    
+    # First, set up non-CUDA resources
     with open(os.path.join(os.path.dirname(__file__), 'theories', cfg.theory.name + '.p')) as f:
         theory = f.read()
 
@@ -223,6 +320,7 @@ def teacher_loop(cfg: DictConfig):
     continue_dir = cfg.get('continue')
     start_iteration = 0
 
+    # Now create the agent (this might initialize CUDA)
     if continue_dir is not None:
         os.chdir(continue_dir)
         print('Continuing run from', continue_dir)
@@ -232,7 +330,12 @@ def teacher_loop(cfg: DictConfig):
             i += 1
         i -= 1
         start_iteration = i
-        agent = torch.load(f'{i}.pt')
+        
+        # Load agent with CPU first to avoid CUDA issues
+        agent = torch.load(f'{i}.pt', map_location='cpu')
+        if torch.cuda.is_available():
+            agent = agent.cuda()
+        
         print('Loaded agent from', f'{i}.pt')
         # Load examples and outcomes.
         if i > 0:
@@ -245,11 +348,16 @@ def teacher_loop(cfg: DictConfig):
                                         if o['hindsight'] and o['proof'] is not None}
 
         print('Loaded', len(proven_conjectures), 'proven conjectures from previous run.')
+    else:
+        # Create agent fresh
+        agent = make_agent(cfg)
 
 
     if cfg.get('freeze_conjecturer', False):
         print('Ablation: Freezing conjecturer.')
 
+    # Get timeout config
+    timeout_per_problem = cfg.get('timeout_per_problem', 300)
 
     with open('log.jsonl', 'w') as log:
         for i in range(start_iteration, cfg.iterations):
@@ -263,6 +371,7 @@ def teacher_loop(cfg: DictConfig):
                 cfg.test_problems_path,
                 num_gpus=num_gpus,
                 num_workers_per_gpu=num_workers_per_gpu,
+                timeout_per_problem=timeout_per_problem,
             )
             print('Test success rate:', test_success_rate)
             log.write(json.dumps({'iteration': i,
@@ -324,14 +433,34 @@ def teacher_loop(cfg: DictConfig):
                 f"Proving {len(train_conjectures)} conjectures using {actual_workers} workers across {num_gpus} GPU(s)."
             )
 
-            with mp.Pool(
-                processes=actual_workers,
-                initializer=_init_worker,
-                initargs=(num_gpus,),
-            ) as pool:
-                results = pool.starmap(_prove, tasks)
+            # Create pool with proper cleanup
+            pool = None
+            try:
+                pool = mp.Pool(
+                    processes=actual_workers,
+                    initializer=_init_worker,
+                    initargs=(num_gpus, num_workers_per_gpu),
+                )
+                
+                # Use timeout wrapper
+                prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
+                results = pool.starmap(prove_func, tasks)
+                
+            finally:
+                if pool is not None:
+                    pool.close()
+                    pool.join()
+                    pool.terminate()
+                    
+                    # Wait for cleanup
+                    time.sleep(0.5)
 
-            test_tasks = [(agent_dump, worker.BackgroundTheory(theory, premises), conjecture) for conjecture in test_conjectures]
+            # Force cleanup after pool
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            test_tasks = [(agent_dump, worker.BackgroundTheory(theory, premises), conjecture, False) for conjecture in test_conjectures]
 
             # Proof search for test conjectures (before tactics)
             total_requested_workers = (num_gpus or 1) * num_workers_per_gpu
@@ -341,12 +470,32 @@ def teacher_loop(cfg: DictConfig):
                 f"Proving {len(test_conjectures)} conjectures using {actual_workers} workers across {num_gpus} GPU(s)."
             )
 
-            with mp.Pool(
-                processes=actual_workers,
-                initializer=_init_worker,
-                initargs=(num_gpus,),
-            ) as pool:
-                test_results = pool.starmap(_prove, test_tasks)
+            # Create pool with proper cleanup
+            pool = None
+            try:
+                pool = mp.Pool(
+                    processes=actual_workers,
+                    initializer=_init_worker,
+                    initargs=(num_gpus, num_workers_per_gpu),
+                )
+                
+                # Use timeout wrapper
+                prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
+                test_results = pool.starmap(prove_func, test_tasks)
+                
+            finally:
+                if pool is not None:
+                    pool.close()
+                    pool.join() 
+                    pool.terminate()
+                    
+                    # Wait for cleanup
+                    time.sleep(0.5)
+
+            # Force cleanup after pool
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             student_results = results
             test_results = test_results
@@ -504,12 +653,32 @@ def teacher_loop(cfg: DictConfig):
                 f"Proving {len(test_conjectures)} conjectures using {actual_workers} workers across {num_gpus} GPU(s) (after tactics)."
             )
 
-            with mp.Pool(
-                processes=actual_workers,
-                initializer=_init_worker,
-                initargs=(num_gpus,),
-            ) as pool:
-                test_results_after_tactics = pool.starmap(_prove, tasks_after_tactics)
+            # Create pool with proper cleanup
+            pool = None
+            try:
+                pool = mp.Pool(
+                    processes=actual_workers,
+                    initializer=_init_worker,
+                    initargs=(num_gpus, num_workers_per_gpu),
+                )
+                
+                # Use timeout wrapper
+                prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
+                test_results_after_tactics = pool.starmap(prove_func, tasks_after_tactics)
+                
+            finally:
+                if pool is not None:
+                    pool.close()
+                    pool.join()
+                    pool.terminate()
+                    
+                    # Wait for cleanup
+                    time.sleep(0.5)
+
+            # Force cleanup after pool
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             rewritten_test_results = rewrite_solutions(test_results, induced_tactics)
 
