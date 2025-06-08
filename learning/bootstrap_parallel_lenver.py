@@ -18,6 +18,7 @@ import gc  # For explicit garbage collection
 import time
 import signal
 from functools import partial
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
 
 import peano
 import worker
@@ -106,25 +107,6 @@ def _init_worker(num_gpus: int, workers_per_gpu: int):
     print(f"Worker {_WORKER_ID}: Assigned to GPU {gpu_id} (sharing with {workers_per_gpu} workers)")
 
 
-def _timeout_handler(signum, frame):
-    raise TimeoutError("Proof search timed out")
-
-
-def _prove_with_timeout(agent_dump: bytes, theory: worker.BackgroundTheory, statement: str, is_eval: bool = False, timeout: int = 300):
-    """Wrapper to add timeout to proof search."""
-    # Set up signal handler for timeout
-    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(timeout)
-    
-    try:
-        result = _prove(agent_dump, theory, statement, is_eval)
-        signal.alarm(0)  # Cancel the alarm
-        return result
-    except TimeoutError:
-        print(f"Timeout proving {statement} after {timeout}s")
-        return StudentResult(["Timeout"], False, statement, None, None, [], [], None, None)
-    finally:
-        signal.signal(signal.SIGALRM, old_handler)
 
 
 def _prove(agent_dump: bytes, theory: worker.BackgroundTheory, statement: str, is_eval: bool = False):
@@ -208,6 +190,44 @@ def _prove(agent_dump: bytes, theory: worker.BackgroundTheory, statement: str, i
             torch.cuda.synchronize()
 
 
+def _prove_with_timeout(tasks, num_workers, timeout_per_problem, num_gpus, num_workers_per_gpu):
+    """Execute proof tasks with proper timeout using ProcessPoolExecutor."""
+    results = []
+    
+    with ProcessPoolExecutor(
+        max_workers=num_workers,
+        initializer=_init_worker,
+        initargs=(num_gpus, num_workers_per_gpu),
+    ) as executor:
+        # Submit all tasks
+        futures = []
+        for task in tasks:
+            future = executor.submit(_prove, *task)
+            futures.append(future)
+        
+        # Collect results with individual timeouts
+        for i, future in enumerate(tqdm(futures, desc="Processing proofs")):
+            try:
+                result = future.result(timeout=timeout_per_problem)
+                results.append(result)
+            except FutureTimeoutError:
+                statement = tasks[i][2] if len(tasks[i]) > 2 else "unknown"
+                print(f"Timeout proving {statement} after {timeout_per_problem}s")
+                timeout_result = StudentResult(
+                    ["Timeout"], False, statement, None, None, [], [], None, None
+                )
+                results.append(timeout_result)
+            except Exception as e:
+                statement = tasks[i][2] if len(tasks[i]) > 2 else "unknown"
+                print(f"Error proving {statement}: {e}")
+                error_result = StudentResult(
+                    [str(e)], False, statement, None, None, [], [], None, None
+                )
+                results.append(error_result)
+    
+    return results
+
+
 def load_problems(problems_path: str):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     problems_path = os.path.join(current_dir, problems_path)
@@ -257,15 +277,8 @@ def test_on_pset(
         f"Evaluating {len(problems)} problems using {actual_workers} workers across {num_gpus} GPU(s)."
     )
 
-    # Use context manager for automatic cleanup
-    with mp.Pool(
-        processes=actual_workers,
-        initializer=_init_worker,
-        initargs=(num_gpus, num_workers_per_gpu),
-    ) as pool:
-        # Use timeout wrapper
-        prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
-        results = pool.starmap(prove_func, tasks)
+    # Use ProcessPoolExecutor with proper timeout
+    results = _prove_with_timeout(tasks, actual_workers, timeout_per_problem, num_gpus, num_workers_per_gpu)
 
     # Process results
     for result in results:
@@ -422,21 +435,14 @@ def teacher_loop(cfg: DictConfig):
                 f"Using consolidated pool with {actual_workers} workers across {num_gpus} GPU(s)."
             )
 
-            # Create consolidated pool using context manager
-            with mp.Pool(
-                processes=actual_workers,
-                initializer=_init_worker,
-                initargs=(num_gpus, num_workers_per_gpu),
-            ) as pool:
-                # Proof search for training conjectures
-                print(f"Proving {len(train_conjectures)} training conjectures...")
-                prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
-                results = pool.starmap(prove_func, tasks)
-                
-                # Proof search for test conjectures (before tactics)
-                test_tasks = [(agent_dump, worker.BackgroundTheory(theory, premises), conjecture, False) for conjecture in test_conjectures]
-                print(f"Proving {len(test_conjectures)} test conjectures...")
-                test_results = pool.starmap(prove_func, test_tasks)
+            # Proof search for training conjectures with timeout
+            print(f"Proving {len(train_conjectures)} training conjectures...")
+            results = _prove_with_timeout(tasks, actual_workers, timeout_per_problem, num_gpus, num_workers_per_gpu)
+            
+            # Proof search for test conjectures (before tactics)
+            test_tasks = [(agent_dump, worker.BackgroundTheory(theory, premises), conjecture, False) for conjecture in test_conjectures]
+            print(f"Proving {len(test_conjectures)} test conjectures...")
+            test_results = _prove_with_timeout(test_tasks, actual_workers, timeout_per_problem, num_gpus, num_workers_per_gpu)
 
             # Force cleanup after pool closes automatically
             gc.collect()
@@ -596,14 +602,8 @@ def teacher_loop(cfg: DictConfig):
                 f"Proving {len(test_conjectures)} conjectures after tactics using {actual_workers} workers across {num_gpus} GPU(s)."
             )
 
-            # Use context manager for tactics evaluation pool
-            with mp.Pool(
-                processes=actual_workers,
-                initializer=_init_worker,
-                initargs=(num_gpus, num_workers_per_gpu),
-            ) as pool:
-                prove_func = partial(_prove_with_timeout, timeout=timeout_per_problem)
-                test_results_after_tactics = pool.starmap(prove_func, tasks_after_tactics)
+            # Proof search for test conjectures after tactics with timeout
+            test_results_after_tactics = _prove_with_timeout(tasks_after_tactics, actual_workers, timeout_per_problem, num_gpus, num_workers_per_gpu)
 
             # Force cleanup after pool closes automatically
             gc.collect()
